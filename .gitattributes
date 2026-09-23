@@ -1,0 +1,24 @@
+# 统一换行符
+# 脚本必须保持 LF —— 否则在 Linux / CI / 安卓构建机上是「每行都有语法错误」，
+# 而在 Windows 上完全正常（本项目已在 GDScript 语言坑里记过同类问题）。
+*.sh   text eol=lf
+*.py   text eol=lf
+*.gd   text eol=lf
+*.gdshader text eol=lf
+
+# 二进制资源：不做任何换行转换
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.webp binary
+*.svg  text
+*.ttf  binary
+*.otf  binary
+*.apk  binary
+*.pck  binary
+*.keystore binary
+*.zip  binary
+*.tpz  binary
+
+# 这些平台会自动生成，不参与 diff
+*.import linguist-generated

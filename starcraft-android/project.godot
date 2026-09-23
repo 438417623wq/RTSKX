@@ -1,0 +1,44 @@
+config_version=5
+
+[application]
+
+config/name="星海战火"
+config/description="一款面向触屏的即时战略游戏。星海战场，三族争锋。"
+run/main_scene="res://assets/scripts/Main.tscn"
+config/features=PackedStringArray("4.4", "GL Compatibility")
+config/icon="res://icon.svg"
+boot_splash/bg_color=Color(0.043, 0.055, 0.09, 1)
+boot_splash/show_image=false
+
+[display]
+
+window/size/viewport_width=1280
+window/size/viewport_height=720
+window/size/window_width_override=1280
+window/size/window_height_override=720
+window/stretch/mode="canvas_items"
+window/stretch/aspect="expand"
+window/handheld/orientation=4
+window/vsync/vsync_mode=1
+
+[input_devices]
+
+pointing/emulate_touch_from_mouse=true
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
+textures/canvas_textures/default_texture_filter=1
+textures/vram_compression/import_etc2_astc=true
+environment/defaults/default_clear_color=Color(0.043, 0.055, 0.09, 1)
+anti_aliasing/quality/msaa_2d=1
+
+[physics]
+
+common/physics_ticks_per_second=60
+common/max_fps=60
+
+[gui]
+
+theme/default_font_multichannel_signed_distance_field=true

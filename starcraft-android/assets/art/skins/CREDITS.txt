@@ -1,0 +1,48 @@
+美术素材来源
+============
+
+⚠️ 当前状态：**已停用**。
+
+    从「第八~十一轮」起，全套美术改回**纯程序化自绘** ——
+    由 assets/scripts/GenTex.gd 逐像素生成，仓库与 APK 里不再有第三方图片。
+    停用开关在 GenTex.USE_BUNDLED_SKINS（默认 false）。
+
+    为什么停用：Kenney 这套是通用科幻图标，造型语言偏「机械 + 卡通」，
+    虫族看起来像紫色机器人而不是异形；而且它和自绘的新建筑
+    （导弹塔 / 光子炮台 / 星际之门…）风格直接打架，一局里会同时出现两种画风。
+
+    本目录的文件**没有删除**，随时可以把开关改回 true 做 A/B 对比。
+    但注意：只要开着，老单位/建筑就会显示成 Kenney 图标。
+
+本目录下的 PNG 由 tools/build_skins.py 从 Kenney 的 CC0 素材包烘焙而来。
+
+原始素材
+--------
+  RTS Pack: Sci-Fi  (120+ sprites)
+  by Kenney Vleugels (Kenney.nl)
+  https://kenney.nl/assets/rts-sci-fi
+  https://opengameart.org/content/sci-fi-rts-120-sprites
+
+授权
+----
+  Creative Commons Zero (CC0 1.0 Universal)
+  https://creativecommons.org/publicdomain/zero/1.0/
+
+  CC0 意味着可以自由用于个人与商业项目，无需署名。
+  这里保留出处只是出于尊重与可追溯性。
+
+烘焙做了什么
+------------
+  1. 按 tools/build_skins.py 里的映射表，把 Kenney 的通用编号
+     挑成本游戏的单位 / 建筑（例如 scifiUnit_02 → u_marine）。
+  2. 裁掉透明边、等比缩放居中，使贴图尺寸与游戏逻辑解耦。
+  3. 按阵营色重着色：彩色像素换色相、保留饱和度与明度（保住明暗层次），
+     灰色金属部分按比例往阵营色上染 —— 这就是经典的「阵营色」做法。
+
+  因此三族共用同一批造型，靠配色区分：人族蓝、虫族紫、神族金。
+
+注意
+----
+  Kenney 这套素材是通用科幻风格，不是《星际争霸》的原版造型。
+  它的造型语言偏「机械 + 卡通」，所以虫族看起来会像紫色机器人而不是异形。
+  想要更贴近原版，需要自己提供美术资源放进 user://skins/ 覆盖本目录。

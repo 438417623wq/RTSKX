@@ -1,0 +1,3 @@
+# 让 Godot 跳过本目录。
+# 这里是 build_skins.py 用的原始素材（Kenney CC0），不是游戏资源 ——
+# 不跳过的话 Godot 会把 126 张 PNG 全部导入进 .godot/imported/，白白撑大项目。

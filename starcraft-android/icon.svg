@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#111a2e"/>
+      <stop offset="1" stop-color="#070b14"/>
+    </linearGradient>
+    <linearGradient id="cry" x1="0" y1="0" x2="0.6" y2="1">
+      <stop offset="0" stop-color="#8fe6ff"/>
+      <stop offset="0.5" stop-color="#3fb6f0"/>
+      <stop offset="1" stop-color="#12507a"/>
+    </linearGradient>
+    <linearGradient id="cry2" x1="0" y1="0" x2="0.6" y2="1">
+      <stop offset="0" stop-color="#b6f2c4"/>
+      <stop offset="0.5" stop-color="#4cc46a"/>
+      <stop offset="1" stop-color="#155c30"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="128" height="128" rx="24" fill="url(#bg)"/>
+
+  <circle cx="26" cy="22" r="1.6" fill="#5f7ba8"/>
+  <circle cx="104" cy="34" r="1.2" fill="#5f7ba8"/>
+  <circle cx="96" cy="18" r="1.0" fill="#4a6488"/>
+  <circle cx="18" cy="96" r="1.3" fill="#4a6488"/>
+  <circle cx="112" cy="102" r="1.5" fill="#5f7ba8"/>
+
+  <polygon points="42,24 58,36 58,72 42,84 26,72 26,36" fill="url(#cry)" opacity="0.95"/>
+  <polygon points="42,24 58,36 42,48 26,36" fill="#cdefff" opacity="0.55"/>
+
+  <polygon points="86,40 99,50 99,78 86,88 73,78 73,50" fill="url(#cry2)" opacity="0.92"/>
+  <polygon points="86,40 99,50 86,60 73,50" fill="#dcffe6" opacity="0.5"/>
+
+  <polygon points="64,60 74,68 74,88 64,96 54,88 54,68" fill="url(#cry)" opacity="0.85"/>
+  <polygon points="64,60 74,68 64,76 54,68" fill="#cdefff" opacity="0.45"/>
+
+  <path d="M18 108 H110" stroke="#2c4568" stroke-width="2" stroke-linecap="round"/>
+  <path d="M28 114 H100" stroke="#1d2f4a" stroke-width="2" stroke-linecap="round"/>
+</svg>
