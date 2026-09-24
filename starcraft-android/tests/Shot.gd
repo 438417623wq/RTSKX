@@ -589,6 +589,140 @@ func _process(delta: float) -> bool:
 	elif _frames == 640:
 		_grab("33_ingame_chat")
 		_main._lan_active_override = false
+		# 法术区域：心灵风暴的伤害圈 + 黑暗虫群的免疫圈 + 单位身上的效果环。
+		#
+		# ⚠️ 这一屏**只有截图能验**（无头调不了 `_draw_*`）：
+		#    区域是半透明的圆，叠在一起会不会糊成一块色斑、
+		#    会不会把里面的单位盖住看不见血条、电弧的密度是不是过密，
+		#    全是观感问题，任何断言都写不出来。
+		_main.start_game("protoss", "easy", "plateau")
+		var ws: World = _main.world
+		ws.ai_enabled = false
+		ws.factions[World.PLAYER]["minerals"] = 3000.0
+		ws.factions[World.PLAYER]["gas"] = 3000.0
+		var bs: Building = ws.buildings_of(World.PLAYER)[0]
+		ws.units.clear()
+		ws.selection = []
+		ws.selected_building = null
+		_main._build_menu_open = false
+		_main._build_info_id = ""
+		var storm_c := bs.pos + Vector2(-150, 30)
+		var swarm_c := bs.pos + Vector2(110, 30)
+		# 风暴圈里：自己人 + 敌人混在一起（正好展示「敌我不分」）
+		ws._spawn_unit("zealot", "protoss", storm_c + Vector2(-18, 0), World.PLAYER)
+		ws._spawn_unit("dragoon", "protoss", storm_c + Vector2(16, 14), World.PLAYER)
+		ws._spawn_unit("zergling", "zerg", storm_c + Vector2(6, -20), World.ENEMY)
+		ws._spawn_unit("hydralisk", "zerg", storm_c + Vector2(-14, 22), World.ENEMY)
+		# 虫群圈里：自己人（展示紫色虚边环）
+		ws._spawn_unit("zealot", "protoss", swarm_c + Vector2(-20, 0), World.PLAYER)
+		ws._spawn_unit("zealot", "protoss", swarm_c + Vector2(14, 12), World.PLAYER)
+		# 施法者站外面
+		ws._spawn_unit("high_templar", "protoss", bs.pos + Vector2(-30, 150), World.PLAYER)
+		var df2 := ws._spawn_unit("defiler", "zerg", bs.pos + Vector2(160, 150), World.ENEMY)
+		ws.update_visibility()
+		ws.cmd_ability([df2], "dark_swarm", swarm_c)
+		var ht2: Unit = null
+		for u in ws.units_of(World.PLAYER):
+			if u.type_id == "high_templar":
+				ht2 = u
+		if ht2 != null:
+			ws.cmd_ability([ht2], "psionic_storm", storm_c)
+		# 跑 0.6 秒：让 dot 跳一次、也让「被辐照」的环有得画
+		for i in range(12):
+			ws.step(0.05)
+		# 顺手挂一个辐照，把「dot 环」也画出来
+		var sv := ws._spawn_unit("science_vessel", "terran", bs.pos + Vector2(-260, 150), World.PLAYER)
+		var mark: Unit = ws.units_of(World.ENEMY)[0]
+		sv.energy = 200.0
+		ws.cmd_ability([sv], "irradiate", mark)
+		ws.update_visibility()
+		_main.cam_zoom = 1.05
+		_main.cam_pos = bs.pos + Vector2(0, 60)
+		_main._clamp_camera()
+		_main.queue_redraw()
+		print("[shot] 法术区域场景已就绪（风暴圈 / 虫群圈 / 三种效果环）")
+
+	elif _frames == 650:
+		_grab("34_spell_zones")
+		# 瞄准态：预览圈 + 施法者射程环 + 顶部提示条。
+		# 要验的是「预览圈和落地后的区域一样大」以及提示条不压顶栏。
+		var wa: World = _main.world
+		var ba: Building = wa.buildings_of(World.PLAYER)[0]
+		var ht3: Unit = null
+		for u in wa.units_of(World.PLAYER):
+			if u.type_id == "high_templar":
+				ht3 = u
+		if ht3 != null:
+			ht3.ability_cd = 0.0
+			ht3.energy = 200.0
+			wa.selection = [ht3]
+			_main._aim_spell = "psionic_storm"
+			_main._aim_pos = ba.pos + Vector2(-150, 30)
+		_main.queue_redraw()
+		print("[shot] 法术瞄准态已就绪")
+
+	elif _frames == 660:
+		_grab("35_spell_aim")
+		_main._aim_spell = ""
+		# 三个施法单位的技能按钮：展示「能量 N」这一行。
+		var wb: World = _main.world
+		var bb: Building = wb.buildings_of(World.PLAYER)[0]
+		wb.units.clear()
+		wb.factions[World.PLAYER]["minerals"] = 3000.0
+		wb.factions[World.PLAYER]["gas"] = 3000.0
+		var a := wb._spawn_unit("high_templar", "protoss", bb.pos + Vector2(-60, 80), World.PLAYER)
+		var b2 := wb._spawn_unit("dragoon", "protoss", bb.pos + Vector2(0, 80), World.PLAYER)
+		var c2 := wb._spawn_unit("archon", "protoss", bb.pos + Vector2(60, 80), World.PLAYER)
+		a.energy = 200.0
+		wb.update_visibility()
+		_main.cam_zoom = 1.30
+		_main.cam_pos = bb.pos + Vector2(0, 80)
+		_main._clamp_camera()
+		wb.selection = [a, b2, c2]
+		wb.selected_building = null
+		_main.queue_redraw()
+		print("[shot] 法术技能按钮场景已就绪")
+
+	elif _frames == 670:
+		_grab("36_spell_buttons")
+		# 三种状态效果的**特写**：dot（绿脉动）/ no_ranged（紫虚边）/ slow（蓝白链环）。
+		#
+		# ⚠️ 为什么单开一屏：这三种环半径只有单位半径的 1.6~1.8 倍，
+		#    在正常的 1.0 缩放下就是十几个像素，糊在贴图上根本看不清
+		#    「画了没有 / 画的哪一种」。而 `_draw_unit` 在无头里跑不起来，
+		#    没有任何断言能替它说话 —— 只有放大截图能。
+		#    另外 `slow` 目前**没有任何法术产出**（是给后续法术留的基础设施），
+		#    靠 `apply_effect` 直接挂，正好一并把渲染验掉。
+		var wc: World = _main.world
+		var bc: Building = wc.buildings_of(World.PLAYER)[0]
+		wc.units.clear()
+		wc.spell_zones.clear()
+		wc.selection = []
+		wc.selected_building = null
+		wc.ai_enabled = false
+		var ids: PackedStringArray = ["dot", "no_ranged", "slow"]
+		var offs: PackedVector2Array = [Vector2(-78, 0), Vector2(0, 0), Vector2(78, 0)]
+		for i in range(ids.size()):
+			var u := wc._spawn_unit("zealot", "protoss", bc.pos + offs[i], World.PLAYER)
+			var sid := ids[i]
+			if sid == "dot":
+				u.apply_effect({"id": "irradiate", "kind": "dot", "duration": 15.0,
+					"remain": 12.0, "dps": 12.0, "damage_type": "normal", "owner": World.ENEMY})
+			elif sid == "no_ranged":
+				u.apply_effect({"id": "dark_swarm", "kind": "no_ranged",
+					"duration": 20.0, "remain": 16.0})
+			else:
+				u.apply_effect({"id": "ensnare", "kind": "slow", "duration": 8.0,
+					"remain": 6.0, "slow_mult": 0.45})
+		wc.update_visibility()
+		_main.cam_zoom = 2.6
+		_main.cam_pos = bc.pos + Vector2(0, 0)
+		_main._clamp_camera()
+		_main.queue_redraw()
+		print("[shot] 状态效果特写场景已就绪（dot / no_ranged / slow）")
+
+	elif _frames == 680:
+		_grab("37_effect_rings")
 		print("[shot] 全部截图完成")
 		return true
 
@@ -698,6 +832,14 @@ func _make_art_sheet() -> void:
 	_sheet(["engineering_bay", "evolution_chamber", "forge",
 		"missile_turret", "spore_colony", "photon_cannon", "stargate"],
 		"23_zoom_buildings_new", 4, 320, 3)
+	# 第十五轮（M5）新增的三个施法单位。单独出一张 —— `22_zoom_units_new`
+	# 是第七轮的对照图，往里塞会把「那一轮画成什么样」的记录冲掉。
+	#
+	# ⚠️ 这三个单位的造型有三条**只有放大图能验**的约束（都写不出断言）：
+	#    圣堂武士**不能有灵能刃**（否则和狂热者分不出来）、
+	#    蝎子必须**扁而宽**（否则和跳虫、蟑螂糊成一团）、
+	#    科学球**不能有炮管**（否则和幽灵战机混淆）。
+	_sheet(["high_templar", "defiler", "science_vessel"], "24_zoom_units_m5", 3, 320, 3)
 
 func _sheet(ids: Array, tag: String, cols: int, cell: int, scale: int = 1) -> void:
 	var rows := int(ceil(float(ids.size()) / float(cols)))

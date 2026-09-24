@@ -410,21 +410,26 @@ func _g7_fog() -> void:
 	_ok(w.is_visible(near.pos), "贴脸的敌方单位在玩家视野内（前置条件）")
 	_ok(not w.is_visible(far.pos), "敌方基地旁的敌方单位在玩家视野外（前置条件）")
 
+	# ⚠️ 这里**不再手写一遍单位记录的字段布局**。
+	#
+	#    原来是逐字段 `r.u32r(); r.u16r(); ...` 手工跳过的。协议升到 v2
+	#    （单位记录尾部加了 `energy` + 效果列表）之后，这段手写解析**没跟上**：
+	#    每个单位少读 2 字节，从第二个单位起全部错位 ——
+	#    「★视野内的敌方单位在快照里★」和「★玩家自己的单位一个都没被过滤掉★」
+	#    一起变红，而**产品代码完全正确**。
+	#
+	#    修法不是「把缺的字段补上」，而是**别再抄一份布局**：直接调生产解码器
+	#    `Net.apply_snapshot()` 解进一份临时世界，再读它的单位表。
+	#    这样「快照里有哪些单位」就只有一个定义，协议再改也不会漏。
 	var ids_of := func(viewer: int) -> Dictionary:
 		var bs := Net.encode_snapshot(w, Net.Buf.new(), 1, viewer)
+		var scratch := _make_world()
+		var res := Net.apply_snapshot(scratch, bs)
 		var out := {}
-		var r := Net.Buf.new()
-		r.load_bytes(bs)
-		r.u8r(); r.u8r(); r.u32r(); r.f32r(); r.u8r()
-		for k in range(2):
-			r.u32r(); r.u32r(); r.u16r(); r.u16r()
-		var n := r.u16r()
-		for i in range(n):
-			var id := r.u32r()
-			r.u16r(); r.u8r()
-			var p := Vector2(r.f32r(), r.f32r())
-			r.f32r(); r.f32r(); r.u8r(); r.u8r(); r.u8r(); r.u8r(); r.u8r()
-			out[id] = p
+		if not bool(res.get("ok", false)):
+			return out
+		for su in scratch.units:
+			out[su.id] = su.pos
 		return out
 
 	var seen: Dictionary = ids_of.call(World.PLAYER)

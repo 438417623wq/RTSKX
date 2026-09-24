@@ -150,6 +150,16 @@ var _attack_move_mode := false
 var _build_menu_open := false
 var _placing_build := ""
 var _ghost_pos := Vector2.ZERO
+
+## 法术瞄准态。非空时，下一次点地图 = 施放这个法术。
+##
+## 复刻「放置建筑」那套交互（按下 → 拖动改落点 → 松手确认），
+## 而不是「点一下技能、再点一下地图」两步 —— 触屏上后者中间那一下
+## 很容易被误判成平移视野，玩家会觉得「点了没反应」。
+var _aim_spell := ""
+var _aim_pos := Vector2.ZERO
+var _aim_drag_id := -1
+
 var _toasts: Array = []
 var _show_help := false
 
@@ -527,7 +537,14 @@ func _c_ability(units_arr: Array, aid: String, target) -> bool:
 	if session == null:
 		return world.cmd_ability(units_arr, aid, target)
 	var p := {"ability_id": aid}
-	if target != null:
+	# 点地法术传的是 `Vector2` 落点，不是实体 —— 指令记录里本来就有 `x/y`
+	# 两个 f32 字段，不用改线格式。
+	# ⚠️ 顺序不能反：`Vector2` 也是 `Variant`，写成 `elif target != null`
+	#    在前面的话，落点会被当成实体去取 `.id`，直接抛错。
+	if target is Vector2:
+		p["x"] = target.x
+		p["y"] = target.y
+	elif target != null:
 		p["target_id"] = int(target.id)
 	return _send_cmd(Net.Cmd.ABILITY, _ids_of(units_arr), p)
 
@@ -1079,6 +1096,7 @@ func _process(delta: float) -> void:
 		_update_pending_gesture()
 	if _long_press_feedback > 0.0:
 		_long_press_feedback -= delta
+	_guard_aim_state()
 	if font == null:
 		_acquire_font()
 	for t in _toasts:
@@ -1728,6 +1746,13 @@ func _draw_world() -> void:
 					Rect2(sp - Vector2(urr * 1.7, urr * 0.9), Vector2(urr * 3.4, urr * 1.8)), false)
 			_draw_unit(u, sp, urr, sel.has(u.id))
 
+	# 法术区域：画在**单位之后、弹道之前**。
+	#
+	# ⚠️ 顺序有讲究：画在单位之前的话，心灵风暴会把里面的兵盖住 ——
+	#    玩家看不到自己的兵还剩多少血，而这正是他最需要知道的事。
+	#    画在弹道之后又会被曳光盖掉一层。夹在中间最合适。
+	_draw_spell_zones(vr)
+
 	# 投射物（迷雾中的不画）。投射物没有 vel 字段，用「指向目标的方向」当拖尾方向。
 	for p in world.projectiles:
 		if not world.is_visible(p["pos"]):
@@ -1775,6 +1800,73 @@ func _draw_world() -> void:
 		draw_circle(esp, rr * grow, Color(ec.r, ec.g, ec.b, et * 0.42))
 		draw_circle(esp, rr * grow * 0.45, Color(1, 1, 1, et * 0.30))
 		draw_arc(esp, rr * grow * 1.2, 0.0, TAU, 26, Color(ec.r, ec.g, ec.b, et * 0.55), 2.2 * cam_zoom)
+
+## 法术区域（心灵风暴的伤害圈 / 黑暗虫群的免疫圈）。
+##
+## 两条铁律：
+##  ① **必须有边界圈**。没有边界，玩家不知道「站在这里到底安不安全」——
+##     而这两个法术的全部玩法就是「站进去 / 别站进去」。
+##  ② **剩余时间要看得出来**。用「闪烁频率 + 透明度」表达：
+##     快没了就闪得更快、更淡，玩家才来得及补一发。
+##
+## ⚠️ 与 `_draw_spell_zones` 同名的概念只此一处，不要在别处再画一遍 ——
+##    重复绘制会让半透明的圈叠加成不透明的色块，看上去像 bug。
+func _draw_spell_zones(vr: Rect2) -> void:
+	for z in world.spell_zones:
+		var zd: Dictionary = z
+		var pos: Vector2 = zd["pos"]
+		var r := float(zd["radius"])
+		if not vr.grow(r + 40.0).has_point(pos):
+			continue
+		# 敌方在迷雾里的法术不画 —— 否则等于告诉玩家「对面刚在这放了技能」。
+		if int(zd.get("owner", 0)) != _me() and not world.is_visible(pos):
+			continue
+		var c := _xf(pos)
+		var rr := r * cam_zoom
+		var dur := maxf(0.001, float(zd.get("duration", 1.0)))
+		var t := clampf(float(zd.get("remain", 0.0)) / dur, 0.0, 1.0)
+		if String(zd.get("effect", "")) == "no_ranged":
+			_draw_swarm_zone(c, rr, t)
+		else:
+			_draw_storm_zone(c, rr, t)
+
+## 心灵风暴：冷白色的电球。
+##
+## 电弧的位置由 `world.elapsed` 算出来，**不用 `randf()`** ——
+## 用随机数的话每帧的折线位置都在跳，画面上是一团噪点，
+## 而且「同一时刻的画面」不可复现，截图测试没法钉。
+func _draw_storm_zone(c: Vector2, rr: float, t: float) -> void:
+	var tm := world.elapsed
+	var flick := 0.5 + 0.5 * sin(tm * (6.0 + (1.0 - t) * 22.0))
+	var fade := 0.30 + 0.70 * t
+	var base := Color(0.62, 0.80, 1.0)
+	draw_circle(c, rr, Color(base.r, base.g, base.b, (0.13 + 0.11 * flick) * fade))
+	draw_circle(c, rr * 0.55, Color(0.88, 0.95, 1.0, (0.09 + 0.09 * flick) * fade))
+	draw_arc(c, rr, 0.0, TAU, 48,
+		Color(base.r, base.g, base.b, (0.42 + 0.32 * flick) * fade), 2.0 * cam_zoom)
+	for k in range(4):
+		var a0 := tm * (1.3 + 0.37 * float(k)) + float(k) * 1.9
+		var a1 := a0 + 1.1 + 0.4 * sin(tm * 3.0 + float(k))
+		var r0 := rr * (0.22 + 0.20 * float(k) / 3.0)
+		draw_line(c + Vector2(cos(a0), sin(a0)) * r0,
+			c + Vector2(cos(a1), sin(a1)) * rr * 0.98,
+			Color(0.93, 0.97, 1.0, 0.30 * fade), 1.4 * cam_zoom)
+
+## 黑暗虫群：暗紫绿的雾。
+##
+## 刻意画得**比风暴更实** —— 它不是一个「事件」，而是一片持续 20 秒的禁区，
+## 必须一眼看出来。风暴可以淡（它是伤害，血条会说话），
+## 虫群不能淡（它什么伤害都不造成，画面上没有任何别的反馈）。
+func _draw_swarm_zone(c: Vector2, rr: float, t: float) -> void:
+	var a := 0.26 + 0.14 * t
+	draw_circle(c, rr, Color(0.42, 0.30, 0.52, a))
+	draw_circle(c, rr * 0.70, Color(0.24, 0.34, 0.24, a * 0.85))
+	draw_arc(c, rr, 0.0, TAU, 48, Color(0.64, 0.52, 0.80, 0.50 + 0.30 * t), 2.2 * cam_zoom)
+	# 沿边缘爬动的一圈「虫」：位置由 elapsed 驱动，不是随机数（同上）。
+	for k in range(10):
+		var ang := TAU * float(k) / 10.0 + world.elapsed * 0.6
+		draw_circle(c + Vector2(cos(ang), sin(ang)) * rr, 2.4 * cam_zoom,
+			Color(0.80, 0.74, 0.96, 0.50))
 
 # 战争迷雾：未探索 = 近乎全黑；探索过但当前不可见 = 压暗的蓝灰。
 # 逐格状态做横向游程合并，避免每帧上千次 draw_rect。
@@ -1891,6 +1983,42 @@ func _draw_unit(u: Unit, sp: Vector2, r: float, selected: bool) -> void:
 		var srr: float = clampf(u.shield / u.max_shield, 0.0, 1.0)
 		draw_circle(sp, sr, Color(accent.r, accent.g, accent.b, 0.07))
 		draw_arc(sp, sr, 0.0, TAU * srr, 26, Color(accent.r, accent.g, accent.b, 0.62), 2.0 * cam_zoom)
+
+	# 法术状态效果：**必须画在单位身上**，不能只靠区域。
+	#
+	# 心灵风暴有区域可看，但辐照是「挂在一个单位身上」的 ——
+	# 不画的话，玩家看到某个兵在掉血却找不到原因，
+	# 而且看不出「它在传染」。
+	# 黑暗虫群同理：区域会跟着走，但**已经走出去的单位**还会残留 0.35 秒，
+	# 那一瞬间的状态只有画在身上才看得见。
+	if not u.effects.is_empty():
+		var ekind := ""
+		var eslow := 1.0
+		for e in u.effects:
+			var ed: Dictionary = e
+			var k := String(ed.get("kind", ""))
+			if k == "dot":
+				ekind = "dot"
+				break
+			elif k == "no_ranged":
+				ekind = "no_ranged"
+			elif k == "slow":
+				ekind = "slow"
+				eslow = minf(eslow, float(ed.get("slow_mult", 1.0)))
+		match ekind:
+			"dot":
+				# 辐照：脉动的绿色毒环。用 elapsed 驱动，截图可复现。
+				var pulse := 0.5 + 0.5 * sin(world.elapsed * 7.0)
+				draw_arc(sp, r * 1.75, 0.0, TAU, 22,
+					Color(0.62, 1.0, 0.45, 0.35 + 0.45 * pulse), 2.2 * cam_zoom)
+			"no_ranged":
+				# 黑暗虫群：紫色虚边（实线会和平时的护盾环撞脸）。
+				draw_arc(sp, r * 1.62, 0.0, TAU, 20, Color(0.70, 0.55, 0.95, 0.55), 2.0 * cam_zoom)
+				draw_arc(sp, r * 1.62, PI * 0.25, PI * 1.25, 8, Color(0.86, 0.78, 1.0, 0.70), 2.0 * cam_zoom)
+			"slow":
+				# 减速：蓝白色链条环，越慢环越实。
+				var t := clampf(1.0 - eslow, 0.0, 1.0)
+				draw_arc(sp, r * 1.55, 0.0, TAU, 18, Color(0.60, 0.82, 1.0, 0.30 + 0.45 * t), 2.4 * cam_zoom)
 
 	# ⚠️ 这里**不**给飞行单位叠「额外机翼」。
 	#    曾经画过一层（`_draw_wings`），当时是为了救「新单位落进默认分支被画成圆球」
@@ -2134,6 +2262,13 @@ func _on_touch(index: int, pos: Vector2, pressed: bool) -> void:
 			_ghost_pos = _screen_to_world(pos)
 			return
 
+		# 3b) 法术瞄准态：和放置建筑**同一套手势**（按下拖动、松手确认）。
+		#     放在 UI 命中之后 —— 技能键本身仍然要能点（再点一次 = 取消瞄准）。
+		if _aim_spell != "":
+			_aim_drag_id = index
+			_aim_pos = _screen_to_world(pos)
+			return
+
 		# 4) 第二根手指落下 → 转入双指手势，作废单指的待定状态
 		if _touches.size() >= 2:
 			_begin_pinch()
@@ -2160,6 +2295,12 @@ func _on_touch(index: int, pos: Vector2, pressed: bool) -> void:
 	if index == _place_drag_id:
 		_place_drag_id = -1
 		_confirm_place(_ghost_pos)
+		return
+
+	# 法术瞄准松手 → 施放
+	if index == _aim_drag_id:
+		_aim_drag_id = -1
+		_confirm_cast()
 		return
 
 	if index == _ui_press_id:
@@ -2242,6 +2383,11 @@ func _on_drag(index: int, pos: Vector2, rel: Vector2) -> void:
 	# 放置模式：拖动幽灵
 	if index == _place_drag_id:
 		_ghost_pos = _screen_to_world(pos)
+		return
+
+	# 法术瞄准：拖动落点
+	if index == _aim_drag_id:
+		_aim_pos = _screen_to_world(pos)
 		return
 
 	# 小地图拖动 = 拖动镜头
@@ -2807,7 +2953,17 @@ func _dispatch_ui(hit: Dictionary) -> void:
 			for su in world.selection:
 				if world.can_use_ability(su, aid):
 					users.append(su)
-			if users.is_empty():
+			# 再点一次正在瞄准的技能键 = 取消瞄准。
+			# 没有这条的话，玩家点错了技能就只能硬放出去（或者去点别的地方）——
+			# 而点别的地方会真的把法术放出去，代价是 75 点能量。
+			if _aim_spell == aid:
+				_aim_spell = ""
+				_play_direct("ui_open")
+				_toast("已取消 %s" % String(GameData.get_spell(aid).get("name", aid)),
+					Color("8fd0ff"))
+			elif _begin_aim(aid, users):
+				pass
+			elif users.is_empty():
 				_play_direct("ui_error")
 			elif _c_ability(users, aid, null):
 				if aid == "stim":
@@ -2844,6 +3000,75 @@ func _toast(text: String, color: Color) -> void:
 	_toasts.append({"text": text, "color": color, "life": 1.6, "max": 1.6})
 	if _toasts.size() > 4:
 		_toasts.pop_front()
+
+## 进入法术瞄准态。返回 true 表示「这个技能需要点地，已经接管了」。
+##
+## 只有 `ground_aoe` 类的法术（心灵风暴 / 黑暗虫群）需要瞄准；
+## 辐照是**点目标**的，和治疗一样直接施放 —— 让它也走瞄准态的话，
+## 玩家要先把圈拖到敌人身上再松手，而圈是按「范围半径」画的，
+## 会让人误以为辐照是范围技能。
+##
+## ⚠️ `users` 必须非空才进入瞄准：否则玩家选中一堆农民点技能键，
+##    会进入一个「怎么点都放不出来」的瞄准态，还退不出去（只能再点一次键）。
+func _begin_aim(aid: String, users: Array) -> bool:
+	if users.is_empty():
+		return false
+	var sp := GameData.get_spell(aid)
+	if sp.is_empty() or String(sp.get("kind", "")) != "ground_aoe":
+		return false
+	_aim_spell = aid
+	# 落点初值给镜头中心：玩家点完技能键之后，手指本来就在屏幕中央附近，
+	# 直接松手就能放出来（不用先拖到某处）。
+	_aim_pos = cam_pos
+	_aim_drag_id = -1
+	_attack_move_mode = false
+	_placing_build = ""
+	_build_menu_open = false
+	_toast("拖动选择落点，松手施放 %s" % String(sp.get("name", aid)), Color("9ad0ff"))
+	return true
+
+## 瞄准态的自愈检查：选中的部队里已经没人能放这个法术了，就退出瞄准。
+##
+## ⚠️ 为什么要有这一步：选择会从**十几个地方**被改（点选 / 框选 / 编队 /
+##    全选同类 / 建筑被选中…）。在每一处都写一句「取消瞄准」，
+##    漏一处就是「玩家切了选择，屏幕还挂着一个瞄准圈」——
+##    这时候点地图会朝一个早已不存在的圣堂武士下施法指令，
+##    客户端表现为「点了没反应」，而单机上只是白扣一次操作。
+##    与其追着十几个调用点跑，不如每帧问一次「还能放吗」。
+func _guard_aim_state() -> void:
+	if _aim_spell == "":
+		return
+	if world == null or world.selected_building != null:
+		_aim_spell = ""
+		return
+	for su in world.selection:
+		if world.can_use_ability(su, _aim_spell):
+			return
+	_aim_spell = ""
+
+## 确认施放瞄准中的法术。
+##
+## ⚠️ 落点合法性（施法距离）由 **World** 判，不在这里判 ——
+##    这里再判一遍的话，两处判据一旦不一致（比如高地射程加成只在一边算了），
+##    就会出现「提示条说够得着、实际放不出来」。UI 只负责「看起来对不对」。
+func _confirm_cast() -> void:
+	if _aim_spell == "":
+		return
+	var sid := _aim_spell
+	_aim_spell = ""
+	var users := []
+	for su in world.selection:
+		if world.can_use_ability(su, sid):
+			users.append(su)
+	if users.is_empty():
+		_play_direct("ui_error")
+		return
+	var nm := String(GameData.get_spell(sid).get("name", sid))
+	if _c_ability(users, sid, _aim_pos):
+		_toast("%s ×%d" % [nm, users.size()], Color("9ad0ff"))
+	else:
+		_toast("%s 超出施法距离或能量不足" % nm, Color("ff9b7b"))
+		_play_direct("ui_error")
 
 # ================================================================ 底部指令面板
 ## 底部指令面板的底板。
@@ -3063,11 +3288,21 @@ func _draw_unit_panel(vp: Vector2, y: float) -> void:
 		draw_circle(sr.get_center(), 7.0 * csc, col)
 		ux -= 36.0 * csc
 
-## 选中部队里出现的技能（去重）。遍历 GameData.ABILITIES 保证按钮顺序稳定，
+## 选中部队里出现的技能（去重）。遍历 GameData 的两张技能表保证按钮顺序稳定，
 ## 不会因为选中顺序变化而跳来跳去。
+##
+## ⚠️ **必须同时遍历 ABILITIES 和 SPELLS** —— 只遍历 ABILITIES 的话，
+##    圣堂武士/蝎子/科学球被选中时技能键**一个都不出现**，
+##    玩家只能看到「这个兵什么都不会」，而且不报错。
+##    这是「数据层对了、界面没画」那类 bug 的又一例。
 func _selection_abilities() -> Array:
 	var out := []
 	for aid in GameData.ABILITIES:
+		for u in world.selection:
+			if (u.abilities() as Array).has(aid):
+				out.append(aid)
+				break
+	for aid in GameData.SPELLS:
 		for u in world.selection:
 			if (u.abilities() as Array).has(aid):
 				out.append(aid)
@@ -3077,18 +3312,25 @@ func _selection_abilities() -> Array:
 ## 技能按钮。和普通指令按钮的区别是它必须把「为什么不能用」写在脸上 ——
 ## 触屏没有悬浮提示，状态不画出来玩家就只能靠猜。
 func _add_ability_button(r: Rect2, aid: String, users: Array) -> void:
-	var ab := GameData.get_ability(aid)
+	# ⚠️ `get_skill` 而不是 `get_ability`：后者对法术返回空字典，
+	#    于是法术按钮会画成一个**没有名字**的灰块（`ab.get("name", aid)`
+	#    拿到的是兜底 id，实际上连 id 都不会显示，因为 `name` 字段读不到）。
+	var ab := GameData.get_skill(aid)
 	var unlocked: bool = world.has_ability_unlock(_me(), aid)
 	var ready := 0
 	for u in users:
 		if world.can_use_ability(u, aid):
 			ready += 1
 	var on := ready > 0
-	draw_rect(r, Color(0.56, 0.89, 0.42, 0.22) if on else Color(1, 1, 1, 0.06), true)
-	draw_rect(r, Color("8fe36b") if on else Color(1, 1, 1, 0.14), false, 1.2)
+	# 瞄准中的那个技能键高亮，玩家才知道「现在在放它」。
+	var aiming := _aim_spell == aid
+	draw_rect(r, Color(0.62, 0.80, 1.0, 0.30) if aiming
+		else (Color(0.56, 0.89, 0.42, 0.22) if on else Color(1, 1, 1, 0.06)), true)
+	draw_rect(r, Color("9ad0ff") if aiming
+		else (Color("8fe36b") if on else Color(1, 1, 1, 0.14)), false, 1.2 if not aiming else 2.0)
 	_draw_text_center(String(ab.get("name", aid)),
 		Rect2(r.position.x, r.position.y + 7.0, r.size.x, 16.0), 14.0,
-		Color(0.94, 0.97, 1.0) if on else Color(0.62, 0.64, 0.70))
+		Color(0.94, 0.97, 1.0) if (on or aiming) else Color(0.62, 0.64, 0.70))
 
 	var sub := ""
 	var subc := Color(0.60, 0.66, 0.76)
@@ -3096,9 +3338,26 @@ func _add_ability_button(r: Rect2, aid: String, users: Array) -> void:
 	for u in users:
 		if u.has_buff(aid):
 			active += 1
-	if not unlocked:
+	# 法术按钮的第二行显示**能量**，不是「就绪 ×N」——
+	# 能量是这个系统里唯一的资源，玩家必须一眼看到还剩多少。
+	# 单位混编时取最低的那个（最保守的估计，不会误报「能放」）。
+	if aiming:
+		sub = "选落点…"
+		subc = Color("9ad0ff")
+	elif not unlocked:
 		sub = "未解锁"
 		subc = Color(0.66, 0.54, 0.48)
+	elif GameData.is_spell(aid):
+		var need := float(ab.get("energy", 0.0))
+		var lowest := 9999.0
+		for u in users:
+			lowest = minf(lowest, u.energy)
+		if lowest >= need:
+			sub = "能量 %d" % int(lowest)
+			subc = Color("8fe36b")
+		else:
+			sub = "能量 %d/%d" % [int(lowest), int(need)]
+			subc = Color("ffd166")
 	elif on:
 		sub = "就绪 ×%d" % ready
 		subc = Color("8fe36b")
@@ -3686,6 +3945,48 @@ func _draw_overlay(vp: Vector2) -> void:
 		draw_rect(r, Color("5fd0ff"), false, 1.2)
 		_draw_text_center(txt, r, 13.5, Color(0.85, 0.93, 1.0))
 
+	# 法术瞄准态：预览圈 + 射程环 + 提示条。
+	#
+	# ⚠️ 预览圈画的**就是**施法半径 `SPELLS[x].radius` —— 和落地后的区域
+	#    用同一个数。另写一个「好看一点」的预览半径，玩家会按预览圈去
+	#    估范围，然后发现打不到边上的人。
+	if _aim_spell != "":
+		var asp := GameData.get_spell(_aim_spell)
+		if not asp.is_empty():
+			var ac := _xf(_aim_pos)
+			var ar := float(asp.get("radius", 40.0)) * cam_zoom
+			var is_swarm := String(asp.get("effect", "")) == "no_ranged"
+			var tint := Color(0.42, 0.30, 0.52) if is_swarm else Color(0.62, 0.80, 1.0)
+			# 射程环：**以施法者为中心**，让玩家一眼看出「这个落点够不够得着」。
+			# 够不着就整体转成红色 —— 触屏上没有悬浮提示，颜色是唯一的手段。
+			var reach := float(asp.get("cast_range", 0.0))
+			var reachable := false
+			for su in world.selection:
+				if not world.can_use_ability(su, _aim_spell):
+					continue
+				draw_arc(_xf(su.pos), reach * cam_zoom, 0.0, TAU, 72,
+					Color(tint.r, tint.g, tint.b, 0.22), 1.2)
+				if su.pos.distance_to(_aim_pos) <= reach:
+					reachable = true
+			if not reachable:
+				tint = Color(1.0, 0.42, 0.36)
+			draw_circle(ac, ar, Color(tint.r, tint.g, tint.b, 0.26))
+			draw_arc(ac, ar, 0.0, TAU, 56, Color(tint.r, tint.g, tint.b, 0.95), 2.2)
+			# 十字准星
+			draw_line(ac - Vector2(ar * 0.28, 0), ac + Vector2(ar * 0.28, 0),
+				Color(1, 1, 1, 0.55), 1.2)
+			draw_line(ac - Vector2(0, ar * 0.28), ac + Vector2(0, ar * 0.28),
+				Color(1, 1, 1, 0.55), 1.2)
+			var nm := String(asp.get("name", _aim_spell))
+			var hint := "拖动选择落点 · 松手施放 %s · 点技能键取消" % nm
+			if not reachable:
+				hint = "超出施法距离 · 靠近一点再放"
+			var hw := font.get_string_size(hint, HORIZONTAL_ALIGNMENT_LEFT, -1, 13.5).x + 28.0
+			var hr := Rect2(vp.x * 0.5 - hw * 0.5, TOP_H + 8.0, hw, 30.0)
+			draw_rect(hr, Color(0.05, 0.09, 0.14, 0.92), true)
+			draw_rect(hr, tint, false, 1.2)
+			_draw_text_center(hint, hr, 13.5, Color(0.85, 0.93, 1.0))
+
 	# 双指手势提示环
 	if _pinch_active and _touches.size() >= 2:
 		var pts := _active_points()
@@ -4240,6 +4541,8 @@ func _selection_clear() -> void:
 	_sel_rect = Rect2()
 	_minimap_id = -1
 	_place_drag_id = -1
+	_aim_drag_id = -1
+	_aim_spell = ""
 	_attack_move_mode = false
 	_build_menu_open = false
 	_placing_build = ""

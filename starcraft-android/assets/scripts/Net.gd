@@ -16,7 +16,12 @@ class_name Net
 ##    而且这条决定了编码布局（哪些记录会被整个跳过），
 ##    **必须从一开始就在**，后补等于把快照格式重写一遍。
 
-const PROTOCOL_VERSION := 1
+## 协议版本。**改动快照/指令的字段布局就必须 +1。**
+##
+## v1 → v2（M5 施法系统）：单位记录末尾追加 `energy` 与「状态效果」，
+## 快照末尾追加「法术区域」。三个都是**追加**，但追加同样会让旧版本
+## 把后面的字节读错位 —— 而错位的症状是「单位乱飞」，比连不上更难查。
+const PROTOCOL_VERSION := 2
 const PORT := 27015
 const DISCOVER_PORT := 27016
 const SNAPSHOT_HZ := 10.0
@@ -41,6 +46,14 @@ enum Msg { HELLO = 1, WELCOME = 2, CMD = 3, SNAPSHOT = 4, CHAT = 5, PING = 6, PO
 
 ## `Unit.mode` 是字符串，快照里只发 1 字节。
 const MODES := ["normal", "sieged"]
+
+## 单位状态效果的**类别**表（`Unit.effects[i].kind`）。
+##
+## 为什么要单独一张表：`kind` 决定的是「这个效果怎么起作用」
+## （dot 掉血 / no_ranged 挡远程 / slow 减速），而 `id` 决定「是谁挂的」。
+## 两个都要传，客户端的渲染才能区分「被心灵风暴烧」和「站在黑暗虫群里」。
+## ⚠️ 顺序**只能追加、不能重排** —— 它就是线上格式。
+const EFFECT_KINDS := ["dot", "no_ranged", "slow"]
 
 # ---- 单位 flags 位 ----
 const UF_ATTACK_MOVE := 1
@@ -101,6 +114,17 @@ static var upgrade_ids := PackedStringArray()
 static var ability_ids := PackedStringArray()
 static var _upgrade_idx: Dictionary = {}
 static var _ability_idx: Dictionary = {}
+## 法术区域表（`GameData.SPELLS` 的 key，排序后固定）。
+## 和 `ability_ids` 分开：那个是「单位技能」的并集，这个是「战场法术」，
+## 两者的用途（指令 vs 快照里的区域）完全不同，混用会让以后加一个
+## 「没有单位能放的区域法术」时索引表悄悄少一项。
+static var spell_ids := PackedStringArray()
+static var _spell_idx: Dictionary = {}
+## 单位身上的**状态效果**表（目前就是法术 id）。
+## ⚠️ 不复用 `ability_ids` —— 效果 id 未来会来自非技能来源
+##    （中毒、减速陷阱…），到时候在 ability_ids 里找不到就静默传成「无」。
+static var effect_ids := PackedStringArray()
+static var _effect_idx: Dictionary = {}
 
 static func ensure_type_table() -> void:
 	if _types_built:
@@ -127,6 +151,16 @@ static func ensure_type_table() -> void:
 	ability_ids = PackedStringArray(ab)
 	for i in range(ability_ids.size()):
 		_ability_idx[String(ability_ids[i])] = i
+	# 法术与效果：直接来自 `GameData.SPELLS` 的 key，排序后固定。
+	var sp: Array = []
+	for k in GameData.SPELLS:
+		sp.append(String(k))
+	sp.sort()
+	spell_ids = PackedStringArray(sp)
+	effect_ids = PackedStringArray(sp)
+	for i in range(spell_ids.size()):
+		_spell_idx[String(spell_ids[i])] = i
+		_effect_idx[String(effect_ids[i])] = i
 	_types_built = true
 
 static func _reset_type_table() -> void:
@@ -135,10 +169,14 @@ static func _reset_type_table() -> void:
 	building_ids = PackedStringArray()
 	upgrade_ids = PackedStringArray()
 	ability_ids = PackedStringArray()
+	spell_ids = PackedStringArray()
+	effect_ids = PackedStringArray()
 	_unit_idx.clear()
 	_building_idx.clear()
 	_upgrade_idx.clear()
 	_ability_idx.clear()
+	_spell_idx.clear()
+	_effect_idx.clear()
 
 static func upgrade_index(id: String) -> int:
 	ensure_type_table()
@@ -159,6 +197,26 @@ static func ability_id_of(idx: int) -> String:
 	if idx < 0 or idx >= ability_ids.size():
 		return ""
 	return String(ability_ids[idx])
+
+static func spell_index(id: String) -> int:
+	ensure_type_table()
+	return int(_spell_idx.get(id, -1))
+
+static func spell_id_of(idx: int) -> String:
+	ensure_type_table()
+	if idx < 0 or idx >= spell_ids.size():
+		return ""
+	return String(spell_ids[idx])
+
+static func effect_index(id: String) -> int:
+	ensure_type_table()
+	return int(_effect_idx.get(id, -1))
+
+static func effect_id_of(idx: int) -> String:
+	ensure_type_table()
+	if idx < 0 or idx >= effect_ids.size():
+		return ""
+	return String(effect_ids[idx])
 
 # ---------------------------------------------------------------- 读写缓冲
 
@@ -349,6 +407,22 @@ static func encode_snapshot(w: World, buf: Buf, tick: int, viewer: int = -1) -> 
 		buf.u8(fl)
 		buf.u8(clampi(roundi(uu.carry * 8.0), 0, 255))
 		buf.u8(uu.harvest_state & 0xFF)
+		# ---- M5：施法资源 ----
+		# 能量用**整点**（u8）而不是比例：上限 200 直接装得下，
+		# 而且 `roundi(energy)` → `float(byte)` 是**精确往返**的，
+		# 比例量化（/200*255）在双精度下会出现 `roundi` 也救不回来的偏差。
+		# 代价是客户端看到的能量有 <1 点的误差 —— 按钮状态上看不出来。
+		# ⚠️ 上限超过 255 的模组会被截断，这是刻意的取舍（多 1 字节换确定性）。
+		buf.u8(clampi(roundi(uu.energy), 0, 255))
+		# 状态效果（dot / no_ranged）。客户端**不跑模拟**，所以只传渲染需要的三样：
+		# 是谁的效果、哪一类、还剩多久。dps / damage_type / owner 传过去也没人用。
+		var efs: Array = uu.effects
+		buf.u8(mini(efs.size(), 255))
+		for ei in range(mini(efs.size(), 255)):
+			var ef: Dictionary = efs[ei]
+			buf.u8(_idx_or_none(effect_index(String(ef.get("id", "")))))
+			buf.u8(EFFECT_KINDS.find(String(ef.get("kind", ""))))
+			buf.u16(clampi(roundi(float(ef.get("remain", 0.0)) * 100.0), 0, 65535))
 
 	# ---- 建筑 ----
 	var blist: Array = []
@@ -399,6 +473,29 @@ static func encode_snapshot(w: World, buf: Buf, tick: int, viewer: int = -1) -> 
 		var r: Dictionary = w.resources[i]
 		buf.u16(i)
 		buf.f32(float(r.get("amount", 0.0)))
+
+	# ---- 法术区域（M5）----
+	# 半径 / 持续时长 / affects 都**不传** —— 它们由法术 id 决定，
+	# 两端查同一张 `GameData.SPELLS` 就行。传过去只是把同一份数据存两遍，
+	# 而且给了「两边不一致」的机会。
+	# 必须传的只有「落点」和「还剩多久」，那才是每帧都在变的部分。
+	#
+	# ⚠️ 和单位一样按迷雾过滤：不滤的话客户端解包就能看到
+	#    黑幕里落下的心灵风暴，等于给了一张「敌人在哪放技能」的地图。
+	var zlist: Array = []
+	for z in w.spell_zones:
+		var zd: Dictionary = z
+		if filtered and not _visible_cell(w, fog, zd["pos"]):
+			continue
+		zlist.append(zd)
+	buf.u8(mini(zlist.size(), 255))
+	for z in zlist:
+		var zd: Dictionary = z
+		buf.u8(_idx_or_none(spell_index(String(zd.get("id", "")))))
+		buf.u8(int(zd.get("owner", 0)) & 0xFF)
+		buf.f32((zd["pos"] as Vector2).x)
+		buf.f32((zd["pos"] as Vector2).y)
+		buf.u16(clampi(roundi(float(zd.get("remain", 0.0)) * 100.0), 0, 65535))
 
 	return buf.data()
 
@@ -467,6 +564,21 @@ static func apply_snapshot(w: World, data: PackedByteArray) -> Dictionary:
 		var fl := r.u8r()
 		var carry := r.u8r()
 		var hstate := r.u8r()
+		var energy := r.u8r()
+		var en := r.u8r()
+		var efs: Array = []
+		for ei in range(en):
+			var eid := effect_id_of(r.u8r())
+			var ki := r.u8r()
+			var erem := r.u16r()
+			if eid == "":
+				continue
+			efs.append({
+				"id": eid,
+				"kind": String(EFFECT_KINDS[clampi(ki, 0, EFFECT_KINDS.size() - 1)]),
+				"remain": float(erem) / 100.0,
+				"duration": float(erem) / 100.0,
+			})
 		var tid := unit_type_id(ti)
 		if tid == "":
 			# 未知类型：字段已经读掉了，只是不造单位。
@@ -488,6 +600,11 @@ static func apply_snapshot(w: World, data: PackedByteArray) -> Dictionary:
 		u.in_combat = (fl & UF_IN_COMBAT) != 0
 		u.carry = float(carry) / 8.0
 		u.harvest_state = hstate
+		# ⚠️ 直接赋值 `energy`，**不要**走 `apply_effect()` —— 那个会按 id 去重
+		#    并且取「更长的时长」，而这里要的是「原样还原主机那份状态」。
+		#    同理效果列表也是直接 append：主机的列表本来就已经去过重了。
+		u.energy = float(energy)
+		u.effects = efs
 		w.units.append(u)
 		w._next_id = maxi(w._next_id, id + 1)
 
@@ -545,6 +662,40 @@ static func apply_snapshot(w: World, data: PackedByteArray) -> Dictionary:
 		var amount := r.f32r()
 		if idx < w.resources.size():
 			(w.resources[idx] as Dictionary)["amount"] = amount
+
+	# ---- 法术区域（M5）----
+	# ⚠️ `reset_dynamic()` 已经清过一次 `spell_zones` 了，这里是**重建**。
+	#    漏掉这一步的症状是「客户端看不到任何法术区域」——
+	#    主机那边风暴正在烧兵，客户端画面上什么都没有，而且不报错。
+	var zn := r.u8r()
+	for i in range(zn):
+		if not r.ok():
+			break
+		var sid := spell_id_of(r.u8r())
+		var zowner := r.u8r()
+		var zx := r.f32r()
+		var zy := r.f32r()
+		var zrem := r.u16r()
+		if sid == "":
+			continue
+		var sp := GameData.get_spell(sid)
+		if sp.is_empty():
+			continue
+		var dur := float(sp.get("duration", 3.0))
+		var z := {
+			"serial": 0, "id": sid, "kind": String(sp.get("kind", "ground_aoe")),
+			"owner": zowner, "pos": Vector2(zx, zy),
+			"radius": float(sp.get("radius", 40.0)),
+			"duration": dur, "remain": float(zrem) / 100.0,
+			"affects": String(sp.get("affects", "all")),
+			"ticks": 0,
+		}
+		if sp.has("dps"):
+			z["dps"] = float(sp["dps"])
+			z["damage_type"] = String(sp.get("damage_type", "normal"))
+		if sp.has("effect"):
+			z["effect"] = String(sp["effect"])
+		w.spell_zones.append(z)
 
 	if not r.ok():
 		return {"ok": false, "reason": "快照被截断", "units": w.units.size(),
@@ -806,7 +957,25 @@ static func apply_cmd(w: World, cmd: Dictionary, sender: int) -> Dictionary:
 					users.append(u)
 			if users.is_empty():
 				return {"ok": false, "reason": "选中的单位都不能使用该技能"}
-			w.cmd_ability(users, aid, find_entity(w, int(cmd["target_id"])))
+			# 目标形状由技能类型决定：
+			#   点地法术（心灵风暴 / 黑暗虫群）→ `Vector2` 落点
+			#   指向型（辐照 / 治疗）          → 目标实体
+			#
+			# ⚠️ 点地法术**不能**退化成 `find_entity(target_id)`：那样落点
+			#    永远落在某个单位身上，玩家点空地就放不出来 ——
+			#    而客户端看到的只是「点了没反应」。
+			var tgt: Variant = null
+			var sp := GameData.get_spell(aid)
+			if not sp.is_empty() and String(sp.get("kind", "")) == "ground_aoe":
+				var gx := float(cmd["x"])
+				var gy := float(cmd["y"])
+				if not _in_map(w, Vector2(gx, gy)):
+					return {"ok": false, "reason": "目标点在地图外"}
+				tgt = Vector2(gx, gy)
+			else:
+				tgt = find_entity(w, int(cmd["target_id"]))
+			if not w.cmd_ability(users, aid, tgt):
+				return {"ok": false, "reason": "施放失败（距离或能量不足）"}
 		Cmd.CANCEL_BUILD:
 			if b == null:
 				return {"ok": false, "reason": "没有选中建筑"}

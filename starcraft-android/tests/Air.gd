@@ -97,12 +97,25 @@ func _test_air_units_exist() -> void:
 			if GameData.is_flying(uid):
 				air.append(uid)
 		var all_combat := true
+		var offenders := []
 		for uid in air:
-			if float(GameData.get_unit(uid).get("damage", 0)) <= 0.0:
+			var d := GameData.get_unit(uid)
+			# ⚠️ **支援单位（`role == "support"`）豁免**：科学球和星际 1 一样是
+			#    零攻击的空中施法单位，它的价值全在辐照上。
+			#    但它**必须带技能** —— 「不能打、也不能放技能」的空中单位
+			#    才是真的死配置（造价 100/225，上场就是白送）。
+			if String(d.get("role", "")) == "support":
+				if (d.get("abilities", []) as Array).is_empty():
+					all_combat = false
+					offenders.append(String(uid) + "(支援单位却没有技能)")
+				continue
+			if float(d.get("damage", 0)) <= 0.0:
 				all_combat = false
+				offenders.append(String(uid))
 		_report("%s 有空中单位" % race, air.size() >= 1,
 			"共 %d 个：%s" % [air.size(), str(air)])
-		_report("%s 的空中单位都有攻击力" % race, all_combat, str(air))
+		_report("%s 的空中单位都有攻击力（支援单位豁免，但必须有技能）" % race,
+			all_combat, "违规：%s" % str(offenders))
 
 ## 三族各有能打到空中的单位 —— 否则对方一出空军就无解。
 func _test_anti_air_units_exist() -> void:

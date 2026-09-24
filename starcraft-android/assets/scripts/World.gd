@@ -31,6 +31,41 @@ var resources: Array = []          # [{pos, amount, max, kind, cell}]
 var projectiles: Array = []        # [{pos, target, dmg, dtype, speed, faction, kind, life}]
 var effects: Array = []            # 爆炸/命中特效
 
+## 战场法术留下的**区域**（心灵风暴 / 黑暗虫群）。
+##
+## ⚠️ 名字不能叫 `effects` —— 那个已经被「爆炸/命中特效」占了（纯视觉、无逻辑）。
+##    两者混在一起的话，「法术区域」会被 `_update_effects` 当成特效按时长删掉，
+##    症状是「心灵风暴只闪一下就没了，一点伤害都没有」。
+##
+## 每项：`{serial, id, kind, owner, pos, radius, duration, remain, affects, tick, ...}`
+var spell_zones: Array = []
+var _zone_serial := 0
+
+## 「黑暗虫群」离开区域后效果还要残留多久（秒）。
+##
+## 区域每帧给里面的人**续期**这个时长，所以站着不走就一直免疫；
+## 走出去之后最多 0.35 秒失效。做成「走出去立刻失效」的话，
+## 一个单位在区域边缘反复进出会每帧在「免疫/不免疫」之间跳，
+## 表现为「同一发子弹有时打得中、有时打不中」。
+const NO_RANGED_LINGER := 0.35
+
+## 判定「这个效果 / 区域已经走完」的容差（秒）。
+##
+## ⚠️ 这不是「防浮点误差」的随口一说，是一个**实测出来**的坑：
+##    倒计时是「反复减 delta」算出来的，在临界点上会带一个浮点尾数。
+##    实测「4 秒 ÷ 0.05 步长」跑满 80 帧之后，剩余时间是 **+5.8e-15** 而不是 0；
+##    而「4 秒 ÷ 0.02 步长」跑满 200 帧之后是 **−3.3e-15**。方向正好相反。
+##    于是同一份代码在两种步长下：
+##      · 0.05 → 区域多活一帧，而那一帧里「已过去的时间」还差一点点不到 4.0，
+##        `floor` 直接**少一跳**（实测 77 而不是 88）；
+##      · 0.02 → 正常。
+##    这就是「帧率无关性」断言抓到的东西 —— 它表面上像「跳数算错」，
+##    根因是浮点尾数的方向。
+##
+##    1 微秒的容差远大于浮点尾数、又远小于 `DOT_TICK`（0.5 秒），
+##    不可能误伤真实的时间差。
+const SPELL_EXPIRE_EPS := 1.0e-6
+
 var _next_id := 1
 var elapsed := 0.0
 var difficulty := "normal"
@@ -315,6 +350,7 @@ func reset_dynamic() -> void:
 	buildings.clear()
 	projectiles.clear()
 	effects.clear()
+	spell_zones.clear()
 	selection.clear()
 	selected_building = null
 	_rebuild_hash()
@@ -387,8 +423,13 @@ func upgrade_level(owner: int, uid: String) -> int:
 	return int((factions.get(owner, {}).get("upgrades", {}) as Dictionary).get(uid, 0))
 
 ## 该阵营是否已解锁某个技能（对应的 unlock 型升级是否已完成）
+##
+## ⚠️ 用 `get_skill` 而不是 `get_ability` —— 法术（SPELLS）在 `get_ability`
+##    里查不到，会拿到空字典，于是 `need == ""` 恒成立。目前两者结果相同
+##    （法术都没写 `unlock`），但一旦给某个法术加上解锁前置，
+##    写错的那个版本会**静默地永远返回 true**，按钮一直亮着、点了没反应。
 func has_ability_unlock(owner: int, ability_id: String) -> bool:
-	var ab := GameData.get_ability(ability_id)
+	var ab := GameData.get_skill(ability_id)
 	var need := String(ab.get("unlock", ""))
 	if need == "":
 		return true
@@ -728,6 +769,13 @@ func _recount_supply(owner: int) -> void:
 func step(delta: float) -> void:
 	elapsed += delta
 	_rebuild_hash()
+	# 法术先结算，本帧的战斗才能读到「黑暗虫群」。
+	#
+	# ⚠️ 放到 `_update_units()` **之后**是一个很隐蔽的顺序错误：
+	#    区域每帧给里面的人续期 `no_ranged`，续期晚一帧的话，
+	#    刚好走出区域的单位会在「已经不该免疫」的那一帧仍然免疫 ——
+	#    而且只在边界上偶发，测试几乎抓不到。
+	_tick_spell_effects(delta)
 	_update_buildings(delta)
 	_update_units(delta)
 	_tick_abilities(delta)
@@ -933,9 +981,44 @@ func _update_building_combat(b: Building) -> void:
 	if b.pos.distance_to(target.pos) > reach + 40.0:
 		b.attack_target = null
 		return
-	if b.can_fire():
+	if b.can_fire() and not blocked_by_dark_swarm(b, target):
 		b.cooldown = b.attack_interval()
 		_fire(b, target)
+
+## 这一发会不会被「黑暗虫群」挡掉。
+##
+## 星际 1 的规则只有一句：**区域内的地面单位免疫远程攻击，近战照打**。
+## 落到代码里是三个条件同时成立：
+##   ① 目标是**地面**单位（虫群在天上没用）
+##   ② 目标身上有 `no_ranged`（站在虫群里）
+##   ③ 攻击者是**远程**（射程 > `MELEE_RANGE`）
+##
+## ⚠️ 第 ③ 条最容易被漏掉，而漏掉的后果是「虫群变成了无敌」——
+##    近战单位也打不动里面的人。症状不明显（虫群本来就是为了抗伤害），
+##    但整局会变成「虫族一放虫群，人族就必须撤退」，平衡直接崩。
+##
+## ⚠️ 第 ① 条也不能省：把飞行单位也算进去的话，
+##    一架飞龙从虫群上空飞过就会突然免疫所有攻击。
+##
+## 判定放在**开火前**（而不是命中时）：开火前判，单位会保持「在射程内待命」
+## 的状态，虫群一散就立刻开火；命中时判，弹道已经飞出去了，
+## 虫群散了那发子弹也是白飞的。
+func blocked_by_dark_swarm(shooter, target) -> bool:
+	if not (target is Unit):
+		return false
+	var t: Unit = target
+	if t.is_flying():
+		return false
+	if not t.has_effect_kind("no_ranged"):
+		return false
+	return _weapon_reach(shooter) > GameData.MELEE_RANGE
+
+## 攻击者的射程。单位和建筑的接口不一样（`attack_range()` vs `attack_range()`），
+## 但两边都有 —— 统一在这里取，免得两处开火点各写一份。
+func _weapon_reach(shooter) -> float:
+	if shooter == null:
+		return 0.0
+	return float(shooter.attack_range())
 
 ## 工地完工或被拆后，解开绑在它上面的工兵，让它们回去采矿
 func _release_builders(b: Building) -> void:
@@ -1267,7 +1350,11 @@ func _update_combat(u: Unit, delta: float) -> void:
 		u.path = PackedVector2Array()
 		u.vel = Vector2.ZERO
 		u.facing = (target.pos - u.pos).angle()
-		if u.can_fire():
+		# 黑暗虫群：区域内的地面单位免疫远程攻击。
+		# ⚠️ 这一句必须在 `u.cooldown = ...` **之前** —— 放在 `_fire` 里的话，
+		#    冷却已经重置了，单位会「每冷却一次就空转一次」，
+		#    虫群里的敌人看起来像是被打得还不了手（其实是根本不开火）。
+		if u.can_fire() and not blocked_by_dark_swarm(u, target):
 			u.cooldown = u.cooldown_time()
 			_fire(u, target)
 	else:
@@ -1457,6 +1544,188 @@ func _update_effects(delta: float) -> void:
 		else:
 			i += 1
 
+# ---------------------------------------------------------------- 战场法术结算
+#
+# 三条独立的时间线，各管各的：
+#   1. **区域**（`spell_zones`）：心灵风暴的伤害圈 / 黑暗虫群的免疫圈，自己倒计时。
+#   2. **单位身上的效果**（`Unit.effects`）：辐照的 dot、黑暗虫群的 `no_ranged`。
+#   3. **dot 结算**：固定 `DOT_TICK` 一跳，**不按帧率漂移**。
+#
+# ⚠️ 为什么不把「区域」也做成一堆单位身上的效果？
+#    心灵风暴的伤害范围是**固定的圆**，不跟着单位走。做成挂单位的效果，
+#    就得每帧重新算「谁在圈里」再补挂 —— 那和直接遍历圆内单位是一回事，
+#    却要多维护一份「谁已经被挂过」的状态。区域归区域，效果归效果。
+
+## 法术总入口。在 `step()` 里、`_update_units()` **之前**调用。
+func _tick_spell_effects(delta: float) -> void:
+	_tick_spell_zones(delta)
+	_tick_unit_effects(delta)
+
+## 效果 / 区域「已经走完的时间」。
+##
+## ⚠️ 到期的这一帧一律按「整整活满」算，而不是 `duration - remain` ——
+##    理由见 `SPELL_EXPIRE_EPS`：`remain` 在临界点上可能是一个**正的**
+##    浮点尾数（+5.8e-15），那样算出来的已过去时间会差一点点不到 `duration`，
+##    `floor` 于是少一跳。
+func _effect_elapsed(e: Dictionary) -> float:
+	var dur := float(e.get("duration", 0.0))
+	var remain := float(e.get("remain", 0.0))
+	return dur if remain <= SPELL_EXPIRE_EPS else dur - remain
+
+func _tick_spell_zones(delta: float) -> void:
+	var i := 0
+	while i < spell_zones.size():
+		var z: Dictionary = spell_zones[i]
+		z["remain"] = float(z["remain"]) - delta
+		# ★先结算，再判到期★ —— 顺序反了会**吞掉最后一跳**。
+		#
+		# 4 秒 / 每 0.5 秒一跳 = 8 跳。`remain` 和「已过去的时间」同时走到终点：
+		# 第 80 帧（0.05 步长）时 `remain` 正好归零、第 8 跳也正好该打。
+		# 先判到期的话，第 8 跳在「已经攒满、还没来得及打」的状态下被整片删掉，
+		# 实测总伤害 77 而不是 88 —— 少 12.5%。这种「只在特定数值下少一点」
+		# 的偏差最难发现：平衡测试只会觉得「风暴好像没那么强」。
+		if z.has("dps"):
+			_zone_dot_tick(z)
+		elif String(z.get("effect", "")) == "no_ranged":
+			_zone_refresh_no_ranged(z)
+		if float(z["remain"]) <= SPELL_EXPIRE_EPS:
+			spell_zones.remove_at(i)
+			continue
+		i += 1
+
+## 区域伤害：按固定间隔结算，不是每帧 `dps * delta`。
+##
+## 每帧结算的话，同样的 dps 在 30 帧下和 144 帧下总伤害一样，
+## 但**跳数**不一样 —— 而 `take_damage` 里有 `maxf(1.0, ...)` 的地板，
+## 每跳至少 1 点。跳数越多，地板带来的额外伤害越多：
+## 144 帧下每帧跳一次，28 dps 会变成 144 × 1 = 144 点/秒。
+##
+## ★跳数由「已经过去的时间」推导，不用累加器★
+##
+## 直觉写法是 `z["tick"] += delta; while z["tick"] >= DOT_TICK: ...`。
+## 它看着没问题，实际上会因为**浮点累加漂移**在临界点上少一跳：
+## 0.05 累加十次未必 `>= 0.5`，于是第一次结算落到第 11 帧，
+## 整条时间线往后偏移一格，4 秒只打出 7 跳。
+##
+## 改成「已过去的时间 ÷ DOT_TICK 取整」之后：
+##   · `remain` 单调下降，`duration - remain` 就是已过去的时间；
+##   · 区域被删掉的条件是「已走完」，所以**最后一跳必定已经算进去**
+##     （构造性保证，不靠浮点运气）；
+##   · 跳数只跟时间有关，跟步长完全无关。
+func _zone_dot_tick(z: Dictionary) -> void:
+	var should := int(floor(_effect_elapsed(z) / GameData.DOT_TICK))
+	var done := int(z.get("ticks", 0))
+	if should <= done:
+		return
+	# 正常一帧最多补一两跳（delta 远小于 DOT_TICK）。上限是为了防
+	# 「某次卡顿给出 10 秒 delta」时一帧打出几十跳 —— 那会让血条直接跳没，
+	# 玩家以为是瞬杀。
+	var guard := 0
+	while done < should and guard < 16:
+		done += 1
+		guard += 1
+		_zone_apply_damage(z)
+	z["ticks"] = done
+
+func _zone_apply_damage(z: Dictionary) -> void:
+	var pos: Vector2 = z["pos"]
+	var per := float(z["dps"]) * GameData.DOT_TICK
+	if per <= 0.0:
+		return
+	var dtype := String(z.get("damage_type", "normal"))
+	# `affects == "all"` 时**敌我不分** —— 这是星际 1 心灵风暴的招牌特性，
+	# 也是它唯一的制衡：乱丢会把自己的兵一起烧死。
+	# 所以这里**不能**按 owner 过滤，`query_units_near` 的 owner 参数必须留 -1。
+	var ground_only := String(z.get("affects", "all")) == "all_ground"
+	for u in query_units_near(pos, float(z["radius"])):
+		if ground_only and u.is_flying():
+			continue
+		# 走 `take_damage` 现有管线：护甲减伤、护盾吸收、死亡清理都在那边。
+		# 法术**不吃攻防升级**（星际 1 里风暴不吃武器升级），
+		# 所以 atk_bonus / def_bonus 都留 0 —— 但基础护甲仍然生效，
+		# 因为「法术单独开一条绕过护甲的伤害路径」会让三套算法分叉。
+		u.take_damage(per, dtype)
+
+## 黑暗虫群：给区域内所有**地面**单位续上 `no_ranged`。
+##
+## 做成「每帧续期」而不是「进场挂一次、出场删一次」，是因为后者要维护
+## 「谁是这个区域挂上的」这份归属状态 —— 两个虫群重叠时就会互相删掉
+## 对方的免疫，而且不报错。
+func _zone_refresh_no_ranged(z: Dictionary) -> void:
+	var pos: Vector2 = z["pos"]
+	var ground_only := String(z.get("affects", "all")) == "all_ground"
+	for u in query_units_near(pos, float(z["radius"])):
+		if ground_only and u.is_flying():
+			continue
+		u.apply_effect({
+			"id": String(z["id"]), "kind": "no_ranged",
+			"remain": NO_RANGED_LINGER, "duration": NO_RANGED_LINGER,
+			"owner": int(z["owner"]),
+		})
+
+## 单位身上效果的计时与 dot 结算。
+##
+## 跳数同样由「已经过去的时间」推导（`duration - remain`），理由见
+## `_zone_dot_tick` —— 累加器写法会在临界点上少一跳，且**只在时长是
+## `DOT_TICK` 整数倍时**出现。辐照 15 秒 / 30 跳正好踩在这个坑上。
+func _tick_unit_effects(delta: float) -> void:
+	for u in units:
+		if u.dead or u.effects.is_empty():
+			continue
+		var arr: Array = u.effects
+		var i := 0
+		while i < arr.size():
+			var e: Dictionary = arr[i]
+			e["remain"] = float(e["remain"]) - delta
+			if float(e["remain"]) <= SPELL_EXPIRE_EPS:
+				arr.remove_at(i)
+				continue
+			if e.has("dps") and u.alive():
+				var should := int(floor(_effect_elapsed(e) / GameData.DOT_TICK))
+				var done := int(e.get("ticks", 0))
+				var guard := 0
+				while done < should and guard < 16:
+					done += 1
+					guard += 1
+					_apply_dot_tick(u, e)
+					# dot 可能把人打死。`take_damage` 的死亡分支会
+					# `clear_effects()` —— 而 `arr` 就是 `u.effects` 本身，
+					# 此刻 size 已经变成 0，再写 `e["ticks"]` 也没有意义。
+					if not u.alive():
+						break
+				e["ticks"] = done
+			i += 1
+
+func _apply_dot_tick(u: Unit, e: Dictionary) -> void:
+	var per := float(e.get("dps", 0.0)) * GameData.DOT_TICK
+	if per <= 0.0:
+		return
+	u.take_damage(per, String(e.get("damage_type", "normal")))
+	# 辐照传染：和星际 1 一样，被辐照的单位会把效果传给自己人。
+	#
+	# 只在 dot 结算时传染（每 0.5 秒一次），不是每帧 —— 每帧的话
+	# 一帧之内整个编队就被传染完，玩家根本看不到「慢慢扩散」的过程。
+	var spread := float(e.get("spread_radius", 0.0))
+	if spread <= 0.0:
+		return
+	var sid := String(e.get("id", ""))
+	# 被传染的人拿到的是一份**全新的**效果（满时长），不是「源单位剩下的那点」。
+	# 传剩余时长的话，一个快到期的人把病传出去，对方只中 0.2 秒，
+	# 看上去像「传染失败」。用满时长才和星际 1 的观感一致。
+	var full := float(e.get("duration", 1.0))
+	for o in query_units_near(u.pos, spread, u.owner_id):
+		if o == u or o.has_effect(sid):
+			continue
+		o.apply_effect({
+			"id": sid, "kind": "dot",
+			"remain": full, "duration": full,
+			"dps": float(e.get("dps", 0.0)),
+			"damage_type": String(e.get("damage_type", "normal")),
+			"owner": int(e.get("owner", -1)),
+			"ticks": 0,
+			"spread_radius": spread,
+		})
+
 # ---- 移动
 func _set_path(u: Unit, goal: Vector2, tolerance: float) -> void:
 	# 已有路径且目标没变、且在重算冷却内 → 不重复算路
@@ -1547,10 +1816,14 @@ func _separate(u: Unit, delta: float) -> void:
 
 ## 该单位此刻能否使用某个技能。UI 的按钮可用状态也走这里，
 ## 保证「按钮亮着但点了没反应」这种情况不会出现。
+##
+## ⚠️ 统一用 `GameData.get_skill()` 取表（先 ABILITIES 再 SPELLS）。
+##    分头查两张表的写法，症状是「法术按钮点得动但放不出来」，
+##    而且不报错 —— `get_ability` 对法术 id 返回空字典，调用方只判了 `is_empty`。
 func can_use_ability(u: Unit, aid: String) -> bool:
 	if u == null or not u.alive():
 		return false
-	var ab := GameData.get_ability(aid)
+	var ab := GameData.get_skill(aid)
 	if ab.is_empty():
 		return false
 	if String(ab.get("unit", "")) != u.type_id:
@@ -1565,7 +1838,11 @@ func can_use_ability(u: Unit, aid: String) -> bool:
 	# 兴奋剂的 cooldown 是 0（SC1 里也是），AI 每帧都会来问一次 ——
 	# 少了这道闸，10 点自伤会每 0.05 秒扣一次，整队陆战队员瞬间被扎到 1 血。
 	# 玩家按住技能键同理。buff 键名就用技能 id，一条规则覆盖所有持续型技能。
-	if u.has_buff(aid):
+	#
+	# ⚠️ 只对**自身增益类**技能（ABILITIES）有意义。法术不是 buff，
+	#    而且心灵风暴**可以**对同一片地重复施放（星际 1 里两片风暴是叠加的），
+	#    所以必须把法术排除在这条闸之外。
+	if not GameData.is_spell(aid) and u.has_buff(aid):
 		return false
 	if ab.has("energy") and u.energy < float(ab["energy"]):
 		return false
@@ -1573,7 +1850,11 @@ func can_use_ability(u: Unit, aid: String) -> bool:
 
 ## 释放技能。target 只有指向型技能（治疗）需要。
 ## 返回是否有至少一个单位成功释放。
+##
+## 法术（SPELLS）走另一条路 —— 见 `_cast_spell`。
 func cmd_ability(units_arr: Array, aid: String, target = null) -> bool:
+	if GameData.is_spell(aid):
+		return _cast_spell(units_arr, aid, target)
 	var any_ok := false
 	for u in units_arr:
 		if not can_use_ability(u, aid):
@@ -1596,6 +1877,96 @@ func cmd_ability(units_arr: Array, aid: String, target = null) -> bool:
 				if _try_heal(u, target):
 					any_ok = true
 	return any_ok
+
+# ---- 战场法术
+
+## 施放法术。
+##
+## `target` 的形状由法术的 `kind` 决定：
+##   "ground_aoe"   → `Vector2` 落点（心灵风暴 / 黑暗虫群）
+##   "target_enemy" → `Unit` 目标（辐照）
+##
+## ⚠️ **落点合法性在施法时校验，之后不再管**。区域落下之后施法者死了、
+##    走远了、能量扣光了，都不影响已经存在的风暴 —— 这是星际 1 的行为。
+##    把区域做成「跟随施法者」的话，圣堂武士一转身风暴就跟着跑，
+##    完全不是那个东西了。
+func _cast_spell(units_arr: Array, sid: String, target) -> bool:
+	var sp := GameData.get_spell(sid)
+	if sp.is_empty():
+		return false
+	var kind := String(sp.get("kind", ""))
+	var reach := float(sp.get("cast_range", 0.0))
+	var any_ok := false
+	for u in units_arr:
+		if not can_use_ability(u, sid):
+			continue
+		var tpos := Vector2.ZERO
+		var tunit: Unit = null
+		match kind:
+			"ground_aoe":
+				if not (target is Vector2):
+					continue
+				tpos = target
+				# 落点必须在施法距离内。**不做「超出距离就自动走过去」** ——
+				# 触屏上玩家点了一下远处，单位却自己往前跑，会被当成「点了没反应」。
+				if u.pos.distance_to(tpos) > reach:
+					continue
+			"target_enemy":
+				if not (target is Unit):
+					continue
+				tunit = target
+				if not tunit.alive() or tunit.owner_id == u.owner_id:
+					continue
+				if u.pos.distance_to(tunit.pos) > reach:
+					continue
+			_:
+				continue
+		u.energy -= float(sp.get("energy", 0.0))
+		u.ability_cd = float(sp.get("cooldown", 1.0))
+		_apply_spell(u, sid, sp, tpos, tunit)
+		event_sfx.emit("cast", u.pos)
+		any_ok = true
+	return any_ok
+
+func _apply_spell(caster: Unit, sid: String, sp: Dictionary, tpos: Vector2, tunit: Unit) -> void:
+	match String(sp.get("kind", "")):
+		"ground_aoe":
+			_zone_serial += 1
+			var dur := float(sp.get("duration", 3.0))
+			var z := {
+				"serial": _zone_serial,
+				"id": sid, "kind": "ground_aoe",
+				"owner": caster.owner_id,
+				"pos": tpos,
+				"radius": float(sp.get("radius", 40.0)),
+				"duration": dur, "remain": dur,
+				"affects": String(sp.get("affects", "all")),
+				"ticks": 0,
+			}
+			if sp.has("dps"):
+				z["dps"] = float(sp["dps"])
+				z["damage_type"] = String(sp.get("damage_type", "normal"))
+			if sp.has("effect"):
+				z["effect"] = String(sp["effect"])
+			spell_zones.append(z)
+			# 落地的一圈白光是**必要的反馈** —— 触屏上玩家点完地，
+			# 如果只看到一片慢慢变淡的区域，会分不清「放出去了」还是「没放出去」。
+			_add_effect(tpos, float(sp.get("radius", 40.0)) * 0.5,
+				Color(0.78, 0.90, 1.0, 0.75), 0.30)
+		"target_enemy":
+			if tunit == null:
+				return
+			var dur := float(sp.get("duration", 15.0))
+			tunit.apply_effect({
+				"id": sid, "kind": "dot",
+				"remain": dur, "duration": dur,
+				"dps": float(sp.get("dps", 0.0)),
+				"damage_type": String(sp.get("damage_type", "normal")),
+				"owner": caster.owner_id,
+				"ticks": 0,
+				"spread_radius": float(sp.get("splash_radius", 0.0)),
+			})
+			_add_effect(tunit.pos, 22.0, Color(0.68, 1.0, 0.55, 0.8), 0.35)
 
 func _try_heal(medic: Unit, target) -> bool:
 	if target == null or not (target is Unit):
@@ -2128,6 +2499,124 @@ func _ai_use_abilities() -> void:
 				cmd_ability([u], "siege")
 			elif u.mode == "sieged" and d < 110.0:
 				cmd_ability([u], "siege")
+	_ai_cast_spells()
+
+## 心灵风暴至少要圈到这么多**敌方**单位才值得放（一次 75 点能量）。
+## 定成 2 而不是 3：AI 的部队本来就比玩家少，门槛太高等于这个技能不存在。
+const AI_STORM_MIN_HITS := 2
+
+## AI 放法术。
+##
+## ⚠️ 心灵风暴**敌我不分**，所以「圈里有几个敌人」之外还必须确认
+##    「圈里一个自己人都没有」。少了后一条，AI 会兴高采烈地把风暴丢在
+##    自己部队头上 —— 看起来像 AI 在自杀，而且不报错、测试也测不出来
+##    （伤害确实结算了、单位确实死了）。
+func _ai_cast_spells() -> void:
+	for u in units_of(ENEMY):
+		if not u.alive() or u.abilities().is_empty():
+			continue
+		for a in u.abilities():
+			var sid := String(a)
+			if not GameData.is_spell(sid) or not can_use_ability(u, sid):
+				continue
+			var sp := GameData.get_spell(sid)
+			match String(sp.get("kind", "")):
+				"target_enemy":
+					# ⚠️ 显式标 `Variant`：这几个辅助函数返回「值或 null」，
+					#    `:=` 会推断成 Variant 并触发 `untyped_declaration`
+					#    警告 —— 而本项目把警告当错误，直接编译失败。
+					var t: Variant = _ai_irradiate_target(u, sp)
+					if t != null:
+						cmd_ability([u], sid, t)
+				"ground_aoe":
+					if String(sp.get("effect", "")) == "no_ranged":
+						var d: Variant = _ai_swarm_spot(u, sp)
+						if d != null:
+							cmd_ability([u], sid, d)
+					else:
+						var s: Variant = _ai_storm_spot(u, sp)
+						if s != null:
+							cmd_ability([u], sid, s)
+
+## 心灵风暴的落点：敌方单位最密的地方，且**自己人一个都不在圈里**。
+## 返回 `Vector2`，没有值得放的位置时返回 `null`。
+func _ai_storm_spot(caster: Unit, sp: Dictionary) -> Variant:
+	var reach := float(sp.get("cast_range", 0.0))
+	var r := float(sp.get("radius", 40.0))
+	var foes := units_of(PLAYER)
+	var mine := units_of(ENEMY)
+	var best: Variant = null
+	var best_n := 0
+	for e in foes:
+		if caster.pos.distance_to(e.pos) > reach:
+			continue
+		var n := 0
+		for o in foes:
+			if o.pos.distance_to(e.pos) <= r:
+				n += 1
+		if n < AI_STORM_MIN_HITS or n <= best_n:
+			continue
+		var hit_friend := false
+		for f in mine:
+			if f.pos.distance_to(e.pos) <= r:
+				hit_friend = true
+				break
+		if hit_friend:
+			continue
+		best = e.pos
+		best_n = n
+	return best
+
+## 黑暗虫群的落点：**自己**地面部队最密、且附近确实有敌人的地方。
+##
+## 虫群是防御性的，所以找的是「自己人的中心」而不是「敌人的中心」——
+## 两者的判据正好相反，写成同一个函数会很难读，所以拆开。
+func _ai_swarm_spot(caster: Unit, sp: Dictionary) -> Variant:
+	var reach := float(sp.get("cast_range", 0.0))
+	var r := float(sp.get("radius", 40.0))
+	var mine := units_of(ENEMY)
+	var foes := units_of(PLAYER)
+	if foes.is_empty():
+		return null
+	var best: Variant = null
+	var best_n := 0
+	for f in mine:
+		if f.is_flying() or caster.pos.distance_to(f.pos) > reach:
+			continue
+		var n := 0
+		var near_foe := false
+		for o in mine:
+			if not o.is_flying() and o.pos.distance_to(f.pos) <= r:
+				n += 1
+		for e in foes:
+			if e.pos.distance_to(f.pos) <= r + 200.0:
+				near_foe = true
+				break
+		if not near_foe or n < 2 or n <= best_n:
+			continue
+		best = f.pos
+		best_n = n
+	return best
+
+## 辐照的目标：优先挑「身边自己人最多」的敌人 —— 传染才是这个技能的用法。
+## 挑血最厚的那个是直觉，但辐照是固定 dps，血厚只意味着打不死。
+func _ai_irradiate_target(caster: Unit, sp: Dictionary) -> Variant:
+	var reach := float(sp.get("cast_range", 0.0))
+	var spread := float(sp.get("splash_radius", 0.0))
+	var foes := units_of(PLAYER)
+	var best: Variant = null
+	var best_n := 0
+	for e in foes:
+		if caster.pos.distance_to(e.pos) > reach or e.has_effect("irradiate"):
+			continue
+		var n := 1
+		for o in foes:
+			if o != e and o.pos.distance_to(e.pos) <= spread:
+				n += 1
+		if n > best_n:
+			best = e
+			best_n = n
+	return best
 
 func _ai_base() -> Vector2:
 	return ai["base_center"]
@@ -2289,6 +2778,14 @@ func _ai_produce() -> void:
 	var army_size := _ai_army_size()
 	var want_army := int(5 * ai["eco_mult"]) + int(elapsed / 26.0)
 	var reserve := 90.0 if army_size >= want_army else 0.0
+
+	# 施法单位：**独立分支 + 数量上限**，不参与上面那套「按造价挑兵」。
+	# 上限 2 是因为它们没有攻击力 —— 3 个科学球就是 975 矿气换 0 点输出。
+	# 但一个都不造的话，AI 永远用不出心灵风暴/辐照，
+	# 玩家会发现「这些法术只有我能放」，而平衡数据里看不出任何异常。
+	if _ai_try_support_unit(f):
+		return
+
 	if army_size < want_army + 6:
 		var built := _built_set(ENEMY)
 		# 按造价从高到低逐个尝试，直到有一个真的造得起。
@@ -2308,17 +2805,52 @@ func _ai_produce() -> void:
 				if cmd_train(b, pick):
 					return
 
+## AI 训练一个施法单位。成功排产返回 true。
+##
+## 施法单位很贵（气 150~225），所以要满足三个条件才动手：
+## ① 该建筑已经完工 ② 场上这类单位 < 2 个 ③ 留足 120 余粮。
+func _ai_try_support_unit(f: Dictionary) -> bool:
+	var built := _built_set(ENEMY)
+	for uid in GameData.available_units(enemy_race, built):
+		var d := GameData.get_unit(uid)
+		if String(d.get("role", "")) != "support":
+			continue
+		if count_units(ENEMY, String(uid)) >= AI_SUPPORT_MAX:
+			continue
+		if float(f["minerals"]) < float(d.get("cost_m", 0)) + 120.0:
+			continue
+		if float(f["gas"]) < float(d.get("cost_g", 0)):
+			continue
+		for b in buildings_of(ENEMY):
+			if not b.complete or b.queue.size() >= 2:
+				continue
+			if not b.trains().has(uid):
+				continue
+			if cmd_train(b, String(uid)):
+				return true
+	return false
+
+## AI 最多同时拥有几个施法单位。
+const AI_SUPPORT_MAX := 2
+
 func _ai_pick_unit(opts: Array) -> String:
 	var c := _ai_unit_candidates(opts)
 	return String(c[0]) if not c.is_empty() else ""
 
 ## 作战单位候选列表：按造价从高到低（偏向更强的单位），
 ## 但保留一点随机性，免得每局都是同一套阵容。
+##
+## ⚠️ **施法单位（`role == "support"`）必须排除在外**。
+##    候选是按造价降序的，科学球 325 矿气排在人族第一 —— 不排除的话
+##    AI 会把科学球当成主力兵种成批生产：它 0 攻击力，
+##    于是 AI 的「军队」变成一群不能还手的胖球，正面直接被推平。
+##    施法单位由 `_ai_produce` 里的独立分支按**数量上限**训练。
 func _ai_unit_candidates(opts: Array) -> Array:
 	var fighters := []
 	for o in opts:
 		var d := GameData.get_unit(o)
-		if String(d.get("role", "")) == "worker":
+		var role := String(d.get("role", ""))
+		if role == "worker" or role == "support":
 			continue
 		fighters.append(o)
 	fighters.sort_custom(func(a, b):

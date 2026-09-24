@@ -70,6 +70,87 @@ var mode := "normal"                # 攻城坦克：normal / sieged
 var mode_timer := 0.0               # 形态切换剩余时间（>0 时不能移动/开火）
 var heal_target = null              # 医疗兵当前的治疗目标
 
+## 状态效果 —— 法术留在单位身上的持续影响（星际的「心灵风暴 / 黑暗虫群 / 辐照」）。
+##
+## ⚠️ 和 `buffs` 同一条铁律：**只在读取时叠加，绝不写回 `data`**。
+##    效果是「这个实例的临时状态」，不是类型属性。
+##
+## 每一项：
+##   id           来源法术 id
+##   kind         "dot"（持续伤害）/ "no_ranged"（挡远程）/ "slow"（减速）
+##   remain       剩余秒数
+##   duration     总时长（UI 画进度条、玩家判断还能撑多久）
+##   dps          每秒伤害（kind == "dot"）
+##   damage_type  伤害类型（dot 用 —— 决定吃哪套减伤）
+##   owner        施法方阵营（dot 打死人时算谁的击杀）
+##   slow_mult    减速倍率（kind == "slow"，多个效果**乘算**）
+##   ticks        已结算的 dot 跳数。**不是累加器** —— 实际跳数由
+##                `duration - remain`（已过去的时间）推导出来，见
+##                `World._zone_dot_tick` 里那段「浮点漂移」的说明。
+##
+## ⚠️ **同源不叠加**（见 `apply_effect`）：星际里两个心灵风暴叠在一起
+##    也只有一份伤害，重复施放只刷新时长。做成可叠加的话，
+##    两个圣堂武士一起放就能秒掉任何单位，平衡直接崩。
+##
+## ⚠️ 计时与伤害结算**都在 `World._tick_spell_effects()`**，不在这里 ——
+##    因为 dot 要走 World 的伤害管线（攻防升级、护盾、击杀归属都在那边）。
+##    把计时也放过去，是为了让「到期」和「结算」永远在同一处，不会错位。
+var effects: Array = []
+
+## 有没有某一类效果。
+##
+## **热路径**：每一次命中结算都会问一次「目标是不是在黑暗虫群里」，
+## 所以必须先判空 —— 绝大多数单位身上一个效果都没有。
+func has_effect_kind(kind: String) -> bool:
+	if effects.is_empty():
+		return false
+	for e in effects:
+		if String((e as Dictionary).get("kind", "")) == kind:
+			return true
+	return false
+
+func has_effect(id: String) -> bool:
+	if effects.is_empty():
+		return false
+	for e in effects:
+		if String((e as Dictionary).get("id", "")) == id:
+			return true
+	return false
+
+## 施加一个效果。**同源取更长的时长**，不叠加。
+func apply_effect(e: Dictionary) -> void:
+	var id := String(e.get("id", ""))
+	for cur in effects:
+		var c: Dictionary = cur
+		if String(c.get("id", "")) == id:
+			var old_dur := float(c.get("duration", 0.0))
+			var new_dur := maxf(old_dur, float(e.get("duration", 0.0)))
+			# ⚠️ 时长被拉长时**必须把 dot 的跳数计数清零**。
+			#    dot 的跳数是由 `duration - remain` 推出来的（见
+			#    `World._zone_dot_tick`）；只改 remain 不改 duration 的话，
+			#    `duration - remain` 会变成负数，新的一轮 dot 一跳都不打。
+			#    症状是「补一发辐照反而把伤害补没了」。
+			if new_dur > old_dur:
+				c["ticks"] = 0
+			c["duration"] = new_dur
+			c["remain"] = maxf(float(c["remain"]), float(e.get("remain", 0.0)))
+			return
+	effects.append(e)
+
+## 减速倍率：所有 slow 效果**乘算**。
+func slow_mult() -> float:
+	if effects.is_empty():
+		return 1.0
+	var m := 1.0
+	for e in effects:
+		var d: Dictionary = e
+		if String(d.get("kind", "")) == "slow":
+			m *= float(d.get("slow_mult", 1.0))
+	return m
+
+func clear_effects() -> void:
+	effects.clear()
+
 ## 是否正站在菌毯上。**由 World 定期刷新，单位自己不要算** ——
 ## 单位拿不到 world 引用，而且「谁站在菌毯上」本来就是个按格子查的全局问题。
 ##
@@ -113,6 +194,8 @@ func speed() -> float:
 	var s := float(data.get("speed", 90.0))
 	if buffs.has("stim"):
 		s *= float(GameData.get_ability("stim").get("speed_mult", 1.0))
+	# 法术减速（瘟疫 / 冰冻之类）。和增益一样**读取时叠加**。
+	s *= slow_mult()
 	# 菌毯加速：虫族单位站在菌毯上跑得更快（星际 1 的招牌机制）。
 	# 标记由 World._refresh_creep_boost() 刷新 —— 它已经替我们挡掉了
 	# 「非虫族」和「飞行单位」两种情况，这里不再重复判。
@@ -218,6 +301,9 @@ func take_damage(amount: float, damage_type: String, atk_bonus: int = 0,
 	if hp <= 0.0:
 		hp = 0.0
 		dead = true
+		# 死掉的单位不该继续带着法术效果 —— 否则「被心灵风暴打死的单位」
+		# 会在尸体上继续吃伤害，把击杀归属算到最后一个施法者头上。
+		clear_effects()
 		return true
 	return false
 

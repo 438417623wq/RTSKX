@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 一次性跑完全部测试套件。
 #
-#   bash tests/run_all.sh              # 快速套件（18 套，约 15 分钟）
+#   bash tests/run_all.sh              # 快速套件（19 套，约 15 分钟）
 #   bash tests/run_all.sh full         # 再加上平衡性对局（每组合 5 局，约 10 分钟）
 #   bash tests/run_all.sh bal          # 只跑平衡性对局
 #
@@ -13,7 +13,8 @@
 #   tail -f /tmp/wb_test_Economy.log
 #
 # 快速套件：Matchup / Smoke / Economy / Touch / Menu / Hud / Mods / Upgrade / Ability /
-#           Build / Air / Terrain / Creep / Net / NetLink / NetSession / Lan / Discovery
+#           Build / Air / Terrain / Creep / Spell / Net / NetLink / NetSession /
+#           Lan / Discovery
 #
 # ⚠️ NetLink / NetSession / Lan / Discovery 四套会**真的开 UDP 端口**
 #    （27315/27316、27515/27516、27615/27616、27715/27716）。
@@ -109,6 +110,27 @@ if [ "$MODE" != "bal" ]; then
   # 「AI 不会被菌毯约束卡死」三条铁律。改 CREEP_RADIUS / can_place_building /
   # Unit.speed 后必须重跑。
   run Creep
+  # 战场法术与状态效果（M5）：锁死「dot 按固定间隔结算、不随帧率漂移」
+  # 「心灵风暴敌我不分」「黑暗虫群只挡远程且只保护地面」
+  # 「同源效果不叠加」「效果与法术区域能跨快照往返」五条铁律。
+  #
+  # ⚠️ 本套上线时抓到四个真问题：
+  #    1. `_tick_spell_zones` 先判到期、后结算 —— 时长是 `DOT_TICK` 整数倍时
+  #       **吞掉最后一跳**：4 秒 / 8 跳只打出 7 跳，总伤害 77 而不是 88。
+  #       只在特定数值下偏差，平衡测试只会觉得「风暴好像没那么强」。
+  #       修法：**先结算、再判到期**。
+  #    2. 第一版「心灵风暴敌我不分」的测试场把狂热者和蟑螂摆到了 14px ——
+  #       两者自己先打起来了，「敌人掉 80」里绝大部分是近战伤害，
+  #       断言看起来像「按阵营过滤」的 bug。靶子改成两个相距 100px 的探机。
+  #    3. 第一版断言「飞行单位能打虫群里的地面单位」—— **方向写反了**。
+  #       星际 1 的黑暗虫群对空中火力同样有效（那才是它用来对抗飞龙的原因）。
+  #       写反的断言会逼着实现开一个「空中攻击无视虫群」的后门。
+  #    4. 快照测试场里蝎子放在落点 500px 外（施法距离 200）→ 施法静默失败，
+  #       于是「往返一致」「字节相同」三条断言**一起变成恒真**。
+  #       现在补了一条「前提成立」的断言把这种情况钉死。
+  # 改 Unit.effects / World._tick_spell_effects / cmd_ability / blocked_by_dark_swarm /
+  # GameData.SPELLS / Net 的快照布局后必须重跑。
+  run Spell
   # 局域网协议层（M4a）：类型索引表 + 世界状态编解码 + 包头与版本。
   # 这一套守的是**「主机与客户端算出的索引必须一模一样」** ——
   # 索引表一旦从 `GameData.UNITS`（模组改过的副本）构建而不是 `base_ids()`，

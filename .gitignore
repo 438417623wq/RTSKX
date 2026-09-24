@@ -19,6 +19,10 @@ starcraft-android/build/
 *.log
 starcraft-android/shots/emu.log
 
+# 阳性对照驱动器（tests/pos_control.py）改坏源码前的自动备份。
+# 正常情况下跑完会自动删；这里兜底，避免异常退出时被误提交。
+*.pcbak
+
 # ---- 系统 ----
 .DS_Store
 Thumbs.db

@@ -111,6 +111,17 @@ const _BASE_UNITS := {
 		"speed": 190.0, "sight": 290.0, "cost_m": 100, "cost_g": 75, "supply": 2, "build_time": 20.0,
 		"size": 9.0, "weapon": "laser", "requires": "factory",
 	},
+	"science_vessel": {
+		# damage 为 0：纯施法单位，没有攻击力（和医疗兵同理，
+		# 索敌逻辑必须跳过零伤害单位，否则它会去找敌人「开火」）。
+		"name": "科学球", "faction": "terran", "role": "support",
+		"desc": "空中施法：辐照并传染给友军",
+		"hp": 200, "shield": 0, "armor": 1, "armor_type": "heavy",
+		"damage": 0, "damage_type": "normal", "range": 0.0, "cooldown": 1.0,
+		"speed": 130.0, "sight": 300.0, "cost_m": 100, "cost_g": 225, "supply": 2,
+		"build_time": 30.0, "size": 11.0,
+		"energy": 200.0, "abilities": ["irradiate"], "requires": "factory",
+	},
 
 	# ---------- 虫族 ----------
 	"drone": {
@@ -153,6 +164,15 @@ const _BASE_UNITS := {
 		"speed": 175.0, "sight": 280.0, "cost_m": 100, "cost_g": 100, "supply": 2, "build_time": 22.0,
 		"size": 9.0, "weapon": "glave", "requires": "spire",
 	},
+	"defiler": {
+		"name": "蝎子", "faction": "zerg", "role": "support",
+		"desc": "地面施法：黑暗虫群免疫远程",
+		"hp": 80, "shield": 0, "armor": 1, "armor_type": "medium",
+		"damage": 0, "damage_type": "normal", "range": 0.0, "cooldown": 1.0,
+		"speed": 60.0, "sight": 230.0, "cost_m": 50, "cost_g": 150, "supply": 2,
+		"build_time": 25.0, "size": 10.0,
+		"energy": 200.0, "abilities": ["dark_swarm"], "requires": "spire",
+	},
 
 	# ---------- 神族 ----------
 	"probe": {
@@ -186,6 +206,15 @@ const _BASE_UNITS := {
 		"damage": 70, "damage_type": "normal", "range": 100.0, "cooldown": 0.85,
 		"speed": 95.0, "sight": 260.0, "cost_m": 175, "cost_g": 175, "supply": 4, "build_time": 28.0,
 		"size": 11.0, "weapon": "psionic", "requires": "templar_archives",
+	},
+	"high_templar": {
+		"name": "圣堂武士", "faction": "protoss", "role": "support",
+		"desc": "地面施法：心灵风暴敌我不分",
+		"hp": 40, "shield": 40, "armor": 0, "armor_type": "light",
+		"damage": 0, "damage_type": "normal", "range": 0.0, "cooldown": 1.0,
+		"speed": 62.0, "sight": 240.0, "cost_m": 50, "cost_g": 150, "supply": 2,
+		"build_time": 22.0, "size": 8.0,
+		"energy": 200.0, "abilities": ["psionic_storm"], "requires": "templar_archives",
 	},
 	"scout": {
 		"name": "侦察机", "faction": "protoss", "role": "combat",
@@ -221,7 +250,7 @@ const _BASE_BUILDINGS := {
 		"name": "重工厂", "faction": "terran", "hp": 1250, "armor": 2, "armor_type": "building",
 		"desc": "生产秃鹫、攻城坦克与幽灵战机",
 		"size": 32.0, "cost_m": 200, "cost_g": 100, "build_time": 36.0, "sight": 200.0,
-		"trains": ["vulture", "siege_tank", "wraith"], "requires": "barracks", "pop_dist": 2.6,
+		"trains": ["vulture", "siege_tank", "wraith", "science_vessel"], "requires": "barracks", "pop_dist": 2.6,
 	},
 	"refinery": {
 		"name": "精炼厂", "faction": "terran", "hp": 600, "armor": 2, "armor_type": "building",
@@ -262,7 +291,7 @@ const _BASE_BUILDINGS := {
 		"name": "尖塔", "faction": "zerg", "hp": 900, "armor": 2, "armor_type": "building",
 		"desc": "生产飞行单位飞龙",
 		"size": 26.0, "cost_m": 200, "cost_g": 150, "build_time": 34.0, "sight": 200.0,
-		"trains": ["mutalisk"], "requires": "spawning_pool", "pop_dist": 2.6,
+		"trains": ["mutalisk", "defiler"], "requires": "spawning_pool", "pop_dist": 2.6,
 	},
 	"extractor": {
 		"name": "萃取房", "faction": "zerg", "hp": 600, "armor": 2, "armor_type": "building",
@@ -313,7 +342,7 @@ const _BASE_BUILDINGS := {
 		"name": "圣堂文库", "faction": "protoss", "hp": 900, "armor": 2, "armor_type": "building",
 		"desc": "训练执政官，神族的终极战力",
 		"size": 26.0, "cost_m": 150, "cost_g": 150, "build_time": 28.0, "sight": 200.0,
-		"trains": ["archon"], "requires": "cybernetics_core", "pop_dist": 2.6,
+		"trains": ["archon", "high_templar"], "requires": "cybernetics_core", "pop_dist": 2.6,
 	},
 	"assimilator": {
 		"name": "吸收塔", "faction": "protoss", "hp": 600, "armor": 2, "armor_type": "building",
@@ -469,6 +498,12 @@ const AIR_RULES := {
 	"mutalisk": {"flying": true, "attack_air": true},
 	"wraith":   {"flying": true, "attack_air": true},
 	"scout":    {"flying": true, "attack_air": true},
+	# 科学球在**天上**，但 damage 为 0 —— 它没有攻击能力，
+	# 所以 attack_air / attack_ground 都不写（缺省 attack_ground = true，
+	# 但 Unit.is_combat() 会先把它挡在索敌之外，两个判据不冲突）。
+	# ⚠️ 漏掉 `flying: true` 的话，科学球会变成一只「在地面上飘的胖球」，
+	#    而且会被地面近战单位锁定追打 —— 不报错，只是看起来很怪。
+	"science_vessel": {"flying": true},
 	# ---- 攻击型建筑 ----
 	"missile_turret": {"attack_air": true, "attack_ground": false},
 	"spore_colony":   {"attack_air": true, "attack_ground": false},
@@ -509,12 +544,17 @@ const UPGRADE_CLASS := {
 	# 人族：步兵 / 载具
 	"scv": "infantry", "marine": "infantry", "marauder": "infantry", "medic": "infantry",
 	"vulture": "vehicle", "siege_tank": "vehicle", "wraith": "vehicle",
+	"science_vessel": "vehicle",
 	# 虫族：近战 / 远程 / 空中
 	"drone": "melee", "zergling": "melee",
 	"hydralisk": "missile", "roach": "missile",
 	"mutalisk": "air",
+	# 蝎子是地面单位，吃地面远程那条线（虽然它本身没有攻击力，
+	# 但攻防升级表必须完整 —— 漏一个 id 就是「升了级但没生效」，不报错）。
+	"defiler": "missile",
 	# 神族：地面（执政官不吃攻防升级，和 SC1 一致）
 	"probe": "ground", "zealot": "ground", "dragoon": "ground",
+	"high_templar": "ground",
 	"archon": "none",
 	# ⚠️ 侦察机暂归 "ground" —— 神族目前只有一条攻击升级线（地面武器 / 护甲）。
 	#    独立的神族空军升级线（SC1 里在机库）留到空军科技树展开时再拆，
@@ -649,6 +689,83 @@ const ABILITIES := {
 ## 百分比会让高能量单位（医疗兵 200）回复得比低能量单位快得多，
 ## 医疗兵只要站着不动 20 秒就回满 200 点，能量形同虚设。
 const ENERGY_REGEN := 0.75
+
+# ================================================================ 战场法术
+#
+# 和 `ABILITIES` **分开两张表**：ABILITIES 是「单位自己的技能」
+# （兴奋剂 / 攻城模式 / 治疗），都是自增益或简单单体目标；
+# SPELLS 是**战场法术** —— 有施法距离、有影响范围、会在战场上留下一片区域
+# 或给目标挂上状态效果。两者的判定、UI（瞄准态）、结算都不同，
+# 混在一张表里会让每个分支都要先问「这是哪种」。
+#
+# kind：
+#   "ground_aoe"   —— 点地施放，在落点生成一片区域（心灵风暴 / 黑暗虫群）
+#   "target_enemy" —— 指定敌方单位（辐照）
+#
+# affects（只对 ground_aoe 有意义）：
+#   "all"        —— 敌我不分。**星际 1 的心灵风暴就是这样**，会打死自己人。
+#                   这不是 bug，是它之所以强的原因之一：乱丢会自伤。
+#   "all_ground" —— 范围内所有地面单位（黑暗虫群保护的是「里面的人」，
+#                   不分敌我 —— 所以它也能保护被围的敌人）。
+## 法术的 `cooldown` 是**防连点**用的，不是平衡数值。
+##
+## 星际 1 的施法单位没有冷却，只有能量约束。但本项目的操作是触屏 + 框选：
+## 玩家一次框住 3 个圣堂武士点一下，会**同时**落下 3 片风暴（这是对的，
+## 和星际 1 一致）；可如果同一帧里因为输入抖动重复触发，
+## 一个圣堂武士就会瞬间把 200 点能量全倒空 —— 玩家只会觉得「能量怎么没了」。
+## 1 秒的冷却足够挡住抖动，又不影响「多单位齐放」。
+const SPELLS := {
+	"psionic_storm": {
+		"name": "心灵风暴", "unit": "high_templar", "kind": "ground_aoe",
+		"desc": "在目标区域降下等离子风暴，4 秒内持续伤害范围内所有单位（敌我不分）",
+		"energy": 75.0, "cast_range": 210.0, "radius": 52.0,
+		"duration": 4.0, "dps": 28.0, "damage_type": "normal",
+		"affects": "all", "cooldown": 1.0,
+	},
+	"dark_swarm": {
+		"name": "黑暗虫群", "unit": "defiler", "kind": "ground_aoe",
+		"desc": "一片虫群遮蔽：区域内地面单位免疫远程攻击，持续 20 秒",
+		"energy": 100.0, "cast_range": 200.0, "radius": 76.0,
+		"duration": 20.0, "effect": "no_ranged",
+		"affects": "all_ground", "cooldown": 1.0,
+	},
+	"irradiate": {
+		"name": "辐照", "unit": "science_vessel", "kind": "target_enemy",
+		"desc": "目标单位持续受到伤害，并传染给身边的友军，持续 15 秒",
+		"energy": 75.0, "cast_range": 230.0,
+		"duration": 15.0, "dps": 12.0, "damage_type": "normal",
+		"splash_radius": 44.0, "cooldown": 1.0,
+	},
+}
+
+## dot 的结算间隔（秒）。
+##
+## ⚠️ **必须固定**，不能「每帧扣 dps * delta」—— 那样总伤害会随帧率漂移，
+##    而且弹道/特效的节奏也对不上。星际 1 的持续伤害是每 0.5 秒一跳。
+const DOT_TICK := 0.5
+
+## 远程 / 近战的判定阈值（像素）。
+##
+## 星际 1 里黑暗虫群挡的是「远程攻击」，近战照打。
+## 本项目的近战单位射程是 34~46（跳虫 34 / 狂热者 46），远程最短 105（蟑螂）。
+## 60 落在两者中间的空档里，不会误判。
+const MELEE_RANGE := 60.0
+
+## 该技能是不是战场法术。
+static func is_spell(skill_id: String) -> bool:
+	return SPELLS.has(skill_id)
+
+## 统一取技能：先查 ABILITIES，再查 SPELLS。
+##
+## ⚠️ 不要在各处分别查两张表 —— 漏一处就是「技能按钮点得动但放不出来」，
+##    而且不报错（`get_ability` 对法术 id 返回空字典，调用方多半只判了 `is_empty`）。
+static func get_skill(skill_id: String) -> Dictionary:
+	if ABILITIES.has(skill_id):
+		return ABILITIES[skill_id]
+	return SPELLS.get(skill_id, {})
+
+static func get_spell(spell_id: String) -> Dictionary:
+	return SPELLS.get(spell_id, {})
 
 ## 该阵营可研究的升级（按建筑筛选：只有对应建筑在场才能研究）
 static func upgrades_for_faction(faction: String) -> Array:

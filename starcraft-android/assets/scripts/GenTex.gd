@@ -574,6 +574,10 @@ static func unit_sprite(id: String, col: Color, dim: Color, accent: Color) -> Im
 		"zealot":      _sp_zealot(img, c, col, dim, hi, lo, accent)
 		"dragoon":     _sp_dragoon(img, c, col, dim, hi, lo, accent)
 		"archon":      _sp_archon(img, c, col, dim, hi, lo, accent)
+		# ---- M5 施法单位 ----
+		"science_vessel": _sp_science_vessel(img, c, col, dim, hi, lo, accent)
+		"defiler":        _sp_defiler(img, c, col, dim, hi, lo, accent)
+		"high_templar":   _sp_high_templar(img, c, col, dim, hi, lo, accent)
 		_:
 			last_was_fallback = true
 			_disc(img, c, c, 20.0, 20.0, col)
@@ -909,6 +913,99 @@ static func _sp_archon(img: Image, c: float, col: Color, dim: Color,
 	_disc(img, c, c, 12.0, 12.0, col.lightened(0.12))
 	_disc(img, c, c, 8.0, 8.0, accent)
 	_disc(img, c - 1.2, c - 1.2, 4.2, 4.2, Color(1, 1, 1, 0.94))
+
+## 圣堂武士：**不拿武器**的施法者。
+##
+## ⚠️ 和狂热者的区分只有两条，缺一条就分不出来：
+##   1. **绝对不能有那两条伸到头上的灵能刃**（`_sp_zealot` 的最后两行）。
+##      加上去的话，两个神族地面单位在 0.6 倍缩放下完全一样。
+##   2. 躯干**窄一圈**（16 vs 18）并收下摆 —— 狂热者是方肩甲，他是长袍。
+## 再加上两侧**悬浮的能量球**，一眼读出「这兵不靠打人吃饭」。
+static func _sp_high_templar(img: Image, c: float, col: Color, dim: Color,
+		hi: Color, lo: Color, accent: Color) -> void:
+	_disc(img, c - 5, c + 12, 4.0, 5.0, lo)
+	_disc(img, c + 5, c + 12, 4.0, 5.0, lo)
+	_round_rect(img, c - 8, c - 8, 16, 22, 6, col)
+	_bevel(img, c - 8, c - 8, 16, 22, 0.26, 0.32)
+	_grain(img, c - 8, c - 8, 16, 22, 0.05, 211)
+	# 收口的长袍下摆（狂热者没有这一段）
+	_round_rect(img, c - 5.5, c + 9, 11, 7, 2.5, col.darkened(0.12))
+	# 袍前的能量缝 —— 不画的话整件袍子是一根纯金色的柱子，远看没有结构
+	_rect(img, c - 1.2, c - 5, 2.4, 13, accent.darkened(0.12))
+	# ⚠️ 肩部**不要画两个整圆** —— 在头两侧会直接读成「米老鼠耳朵」
+	#    （`_sp_marine` 的注释里已经踩过同一个坑：肩甲做成大圆就是耳朵）。
+	#    改成两颗**悬浮的能量球**：位置比肩更低、离身体更远，
+	#    读作「他在蓄能量」，而不是「他长了耳朵」。
+	for s: float in [-1.0, 1.0]:
+		var ex := c + s * 14.0
+		_disc(img, ex, c + 2, 4.2, 4.2, Color(accent.r, accent.g, accent.b, 0.32))
+		_disc(img, ex, c + 2, 2.6, 2.6, accent)
+		_disc(img, ex, c + 2, 1.2, 1.2, Color(0.94, 0.99, 1.0))
+	# 发光的兜帽（比狂热者的头盔亮一档）
+	_disc(img, c, c - 11, 5.4, 5.4, lo)
+	_disc(img, c, c - 12, 3.8, 3.8, Color(0.70, 0.89, 1.0))
+	_disc(img, c, c - 12, 2.0, 2.0, Color(0.95, 0.99, 1.0))
+
+## 蝎子：星际 1 里最**低矮**的虫族单位。
+##
+## ⚠️ 三个虫族地面单位的轮廓必须能分开（它们会同时出现在一队里）：
+##   跳虫 = 小、细、带尖爪；蟑螂 = 中等、椭圆、甲壳纹；
+##   **蝎子 = 扁而宽 + 背上的酸囊**。
+## 做法是让身体**横向 21 × 纵向 14**（比宽还扁）+ 四条外撑的短粗腿，
+## 缩到 0.6 倍时轮廓依然是「趴着的一坨」，不会和跳虫糊在一起。
+static func _sp_defiler(img: Image, c: float, col: Color, dim: Color,
+		hi: Color, lo: Color, accent: Color) -> void:
+	# 四条短粗腿往外撑 —— 强化「贴地」
+	for k in range(4):
+		var a := PI * 0.25 + PI * 0.5 * float(k)
+		var d := Vector2(cos(a), sin(a))
+		_line(img, Vector2(c, c + 3) + d * 7.0, Vector2(c, c + 3) + d * 19.0,
+			dim.lightened(0.06), 5.0)
+		_disc(img, (Vector2(c, c + 3) + d * 19.0).x, (Vector2(c, c + 3) + d * 19.0).y,
+			3.0, 3.0, lo)
+	# 扁而宽的身体
+	_disc(img, c, c + 2, 21.0, 14.0, dim)
+	_disc(img, c, c + 2, 18.5, 12.0, col)
+	_bevel(img, c - 21, c - 12, 42, 28, 0.24, 0.34)
+	_grain(img, c - 21, c - 12, 42, 28, 0.05, 307)
+	# 背上的酸囊（招牌：一个深色鼓包，缩略图里就是这块最抢眼）
+	_disc(img, c, c + 1, 8.6, 6.6, Color(0.30, 0.36, 0.20))
+	_disc(img, c, c - 1, 5.4, 4.0, Color(0.44, 0.56, 0.26))
+	_disc(img, c, c - 2, 2.4, 1.8, Color(0.70, 0.86, 0.42))
+	# 前缘的两只小眼睛
+	_disc(img, c - 6, c - 11, 2.2, 2.2, accent)
+	_disc(img, c + 6, c - 11, 2.2, 2.2, accent)
+
+## 科学球：人族的**空中**施法单位。
+##
+## ⚠️ 「在空中」由**渲染层的影子偏移**表达（见 `godot-procedural-sprite-qa`
+##    铁律四），**不要往贴图上叠机翼** —— 幽灵战机已经有大后掠翼了，
+##    再叠一层就是「四只翅膀」。
+## 所以这里的任务是「一眼看出它不打架」：圆滚滚的机体 + 顶部穹顶 + 一圈环，
+## **没有炮管**（幽灵战机、侦察机都有明显的前向炮）。
+static func _sp_science_vessel(img: Image, c: float, col: Color, dim: Color,
+		hi: Color, lo: Color, accent: Color) -> void:
+	# 两侧的推进舱
+	_disc(img, c - 15, c + 4, 6.0, 7.0, dim)
+	_disc(img, c + 15, c + 4, 6.0, 7.0, dim)
+	_disc(img, c - 15, c + 4, 3.6, 4.2, col.lightened(0.10))
+	_disc(img, c + 15, c + 4, 3.6, 4.2, col.lightened(0.10))
+	# 圆滚滚的主机体（横向比纵向宽 —— 俯视下的「胖」
+	_disc(img, c, c, 17.0, 15.0, dim)
+	_disc(img, c, c - 1, 14.5, 12.5, col)
+	_bevel(img, c - 17, c - 15, 34, 30, 0.26, 0.32)
+	_grain(img, c - 17, c - 15, 34, 30, 0.05, 419)
+	# 一圈环（侦察 / 科研仪器的读法）
+	_ring(img, c, c - 1, 11.0, 1.8, accent.darkened(0.20))
+	# 顶部穹顶 + 中心的传感器
+	_disc(img, c, c - 2, 7.6, 7.0, col.lightened(0.18))
+	_disc(img, c, c - 3, 5.0, 4.6, accent)
+	_disc(img, c, c - 4, 2.6, 2.4, Color(0.94, 0.99, 1.0))
+	# 两侧的采集探头（不是炮 —— 画成短圆头而不是长管）
+	_rect(img, c - 22, c - 2, 7.0, 3.0, Color(0.72, 0.78, 0.86))
+	_rect(img, c + 15, c - 2, 7.0, 3.0, Color(0.72, 0.78, 0.86))
+	_disc(img, c - 22, c - 0.5, 2.2, 2.2, accent.darkened(0.14))
+	_disc(img, c + 22, c - 0.5, 2.2, 2.2, accent.darkened(0.14))
 
 # ================================================================ 建筑贴图
 
