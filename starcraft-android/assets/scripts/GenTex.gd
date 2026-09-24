@@ -578,6 +578,7 @@ static func unit_sprite(id: String, col: Color, dim: Color, accent: Color) -> Im
 		"science_vessel": _sp_science_vessel(img, c, col, dim, hi, lo, accent)
 		"defiler":        _sp_defiler(img, c, col, dim, hi, lo, accent)
 		"high_templar":   _sp_high_templar(img, c, col, dim, hi, lo, accent)
+		"queen":          _sp_queen(img, c, col, dim, hi, lo, accent)
 		_:
 			last_was_fallback = true
 			_disc(img, c, c, 20.0, 20.0, col)
@@ -1007,6 +1008,49 @@ static func _sp_science_vessel(img: Image, c: float, col: Color, dim: Color,
 	_disc(img, c - 22, c - 0.5, 2.2, 2.2, accent.darkened(0.14))
 	_disc(img, c + 22, c - 0.5, 2.2, 2.2, accent.darkened(0.14))
 
+## 虫后：虫族的空中施法单位（诱捕网）。
+##
+## ⚠️★单位贴图**会被旋转**★（朝向 `facing`），所以「画得竖一点 / 横一点」
+##    **完全不能**用来区分单位 —— 竖着画的东西转 90° 就变成横的。
+##    只有**旋转不变的轮廓特征**才算数。虫后的辨识特征是
+##    「一个大肚子 + 三颗排成一线的卵 + 头顶一根长角」，转任何角度都还在。
+##
+## ⚠️ 刻意避开的两条撞车路线：
+##    · **不做成「圆滚滚 + 一圈环」** —— 那是科学球。两者都是 0 攻击力的
+##      空中支援单位，认错代价最直接：以为虫后能放辐照。
+##    · **不做成「一对尖翼」** —— 那是飞龙。虫后的翼做成**短而钝、半透明**，
+##      不构成主轮廓（缩到 0.6 倍时基本看不见，剩下的就是「圆肚子 + 三颗卵」）。
+static func _sp_queen(img: Image, c: float, col: Color, dim: Color,
+		hi: Color, lo: Color, accent: Color) -> void:
+	# 朝后的一对钝翼（半透明，不参与主轮廓）
+	for s: float in [-1.0, 1.0]:
+		_poly(img, PackedVector2Array([
+			Vector2(c, c - 1.0), Vector2(c + s * 20.0, c + 7.0),
+			Vector2(c + s * 17.0, c + 15.0), Vector2(c, c + 7.0),
+		]), Color(col.r, col.g, col.b, 0.46))
+	# 腹部：整个造型里最大的一块
+	_disc(img, c, c + 3, 15.0, 13.0, dim)
+	_disc(img, c, c + 2, 13.0, 11.0, col)
+	_bevel(img, c - 15, c - 10, 30, 26, 0.22, 0.34)
+	_grain(img, c - 15, c - 10, 30, 26, 0.05, 613)
+	# 胸部（往前收）
+	_disc(img, c, c - 9, 9.5, 8.0, dim)
+	_disc(img, c, c - 10, 8.0, 6.6, col.lightened(0.08))
+	# ★三颗卵★ —— 排成一线，旋转不变的招牌特征
+	for k in range(3):
+		var oy := c - 1.0 + float(k) * 7.0
+		_disc(img, c, oy, 3.4, 3.0, Color(accent.r, accent.g, accent.b, 0.92))
+		_disc(img, c - 0.8, oy - 0.8, 1.4, 1.2, Color(1, 1, 1, 0.55))
+	# 头顶的长角（不对称的那一根，转起来最显眼）
+	_poly(img, PackedVector2Array([
+		Vector2(c, c - 27.0), Vector2(c + 4.2, c - 14.0),
+		Vector2(c, c - 11.0), Vector2(c - 4.2, c - 14.0),
+	]), accent.darkened(0.30))
+	# 两根前伸的短刺（护住头）
+	for s: float in [-1.0, 1.0]:
+		_line(img, Vector2(c + s * 7.0, c - 12.0), Vector2(c + s * 13.0, c - 19.0), lo, 2.6)
+	_disc(img, c, c - 13, 2.4, 2.4, hi)
+
 # ================================================================ 建筑贴图
 
 ## 按 id 生成建筑俯视贴图。建筑不旋转。
@@ -1034,6 +1078,7 @@ static func building_sprite(id: String, col: Color, dim: Color, accent: Color) -
 		"spawning_pool":    _bb_spawning_pool(img, c, col, dim, accent)
 		"evolution_chamber": _bb_evolution_chamber(img, c, col, dim, accent)
 		"spire":            _bb_spire(img, c, col, dim, accent)
+		"queen_nest":       _bb_queen_nest(img, c, col, dim, accent)
 		"extractor":        _bb_extractor(img, c, col, dim, accent)
 		"nexus":            _bb_nexus(img, c, col, dim, accent)
 		"pylon":            _bb_pylon(img, c, col, dim, accent)
@@ -1373,6 +1418,36 @@ static func _bb_spire(img: Image, c: float, col: Color, dim: Color, accent: Colo
 		Vector2(c, c - 35), Vector2(c + 6, c - 19),
 		Vector2(c, c - 13), Vector2(c - 6, c - 19)]), accent.darkened(0.22))
 	_disc(img, c, c - 28, 3.4, 3.4, accent)
+
+## 虫后巢穴：六边形底座 + 中央一颗大卵囊 + 六个角上的小卵囊。
+##
+## ⚠️ 主轮廓用**六边形**是为了和其他虫族建筑拉开。现有的四个 ——
+##    虫巢（圆 + 8 根长刺）、尖塔（细高 + 两侧翼）、孵化池（圆盘 + 12 根短刺）、
+##    进化腔（矮宽腔体）—— **全是圆形系**。再加一个圆的就分不出来了，
+##    而虫后巢穴和孵化池职责最接近（都是「造兵的建筑」），
+##    在手机上缩到 0.6 倍时几乎一模一样。
+static func _bb_queen_nest(img: Image, c: float, col: Color, dim: Color, accent: Color) -> void:
+	var outer := PackedVector2Array()
+	var inner := PackedVector2Array()
+	for k in range(6):
+		var a := TAU * float(k) / 6.0 - PI * 0.5
+		outer.append(Vector2(c + cos(a) * 33.0, c + sin(a) * 33.0))
+		inner.append(Vector2(c + cos(a) * 29.0, c + sin(a) * 29.0))
+	_poly(img, outer, dim.darkened(0.26))
+	_poly(img, inner, col)
+	_bevel(img, c - 29, c - 29, 58, 58, 0.24, 0.32)
+	_grain(img, c - 29, c - 29, 58, 58, 0.05, 727)
+	# 六个角上的小卵囊（蜂巢感）
+	for k in range(6):
+		var a := TAU * float(k) / 6.0 - PI * 0.5
+		var p := Vector2(c + cos(a) * 21.0, c + sin(a) * 21.0)
+		_disc(img, p.x, p.y, 6.0, 5.4, dim.darkened(0.10))
+		_disc(img, p.x, p.y - 0.6, 4.2, 3.8, Color(accent.r, accent.g, accent.b, 0.88))
+	# 中央的大卵囊
+	_disc(img, c, c, 13.5, 12.5, dim.darkened(0.34))
+	_disc(img, c, c - 1, 11.0, 10.0, Color(col.r * 0.66, col.g * 0.50, col.b * 0.74))
+	_ring(img, c, c - 1, 8.0, 2.0, Color(accent.r, accent.g, accent.b, 0.60))
+	_disc(img, c - 1, c - 3, 3.4, 3.0, Color(1.0, 0.98, 0.92, 0.82))
 
 static func _bb_extractor(img: Image, c: float, col: Color, dim: Color, accent: Color) -> void:
 	for k in range(4):

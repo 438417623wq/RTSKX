@@ -1931,6 +1931,11 @@ func _cast_spell(units_arr: Array, sid: String, target) -> bool:
 func _apply_spell(caster: Unit, sid: String, sp: Dictionary, tpos: Vector2, tunit: Unit) -> void:
 	match String(sp.get("kind", "")):
 		"ground_aoe":
+			# ★两种 ground_aoe★ —— 见 GameData.SPELLS 里 `instant` 那段说明。
+			#   持久区域（心灵风暴 / 黑暗虫群）走下面；一次性命中（诱捕网）走这里。
+			if bool(sp.get("instant", false)):
+				_apply_instant_aoe(caster, sid, sp, tpos)
+				return
 			_zone_serial += 1
 			var dur := float(sp.get("duration", 3.0))
 			var z := {
@@ -1967,6 +1972,64 @@ func _apply_spell(caster: Unit, sid: String, sp: Dictionary, tpos: Vector2, tuni
 				"spread_radius": float(sp.get("splash_radius", 0.0)),
 			})
 			_add_effect(tunit.pos, 22.0, Color(0.68, 1.0, 0.55, 0.8), 0.35)
+
+## 一次性区域法术（诱捕网）：**放下的一瞬间**抓一遍圈里的单位。
+##
+## 和 `_zone_refresh_no_ranged` 的差别是本质的，不是写法上的：
+##   · 那个是「每帧重新判定谁在圈里」，效果靠 `NO_RANGED_LINGER` 短促续期，
+##     所以**人一出圈就立刻没事**，圈里后来进来的人会中招；
+##   · 这个是「结算一次、挂满时长」，效果挂在单位身上自己倒计时，
+##     所以**出了圈照样慢满 25 秒**，后来进圈的完全不受影响。
+##
+## ⚠️ **不要用 `query_units_near()`**，用线性扫。
+##    哈希网格 `_hash` 只在 `step()` 开头重建，而**玩家指令是在 `step()` 之外
+##    进来的**（输入事件 → `cmd_ability`）。用哈希网格的话，玩家放技能命中的是
+##    「上一帧的位置」，而且测试里更致命 —— 手工摆好单位直接调 `cmd_ability`，
+##    哈希还是空的，**一个单位都抓不到，而且不报错**，看起来像技能没生效。
+##    线性扫 O(单位数)，一次施法一次，代价可以忽略。
+func _apply_instant_aoe(caster: Unit, sid: String, sp: Dictionary, tpos: Vector2) -> void:
+	var eff := String(sp.get("effect", ""))
+	if eff == "":
+		# 没写 `effect` 的「一次性」法术什么都不会发生 —— 静默失败最难查，
+		# 所以这里显式挡一道（数据写错时至少能在日志里看见）。
+		push_warning("法术 %s 标了 instant 却没有 effect 字段" % sid)
+		return
+	var radius := float(sp.get("radius", 40.0))
+	var dur := float(sp.get("duration", 3.0))
+	# `affects == "all"` 时**敌我不分** —— 星际 1 的诱捕网对友军一样生效。
+	# 这里可以直接按 owner 过滤（不像 dot 结算那样必须留 -1），因为
+	# 「抓谁」这个决定在施法瞬间就做完了，不存在「谁后来进来了」的问题。
+	var ground_only := String(sp.get("affects", "all")) == "all_ground"
+	var r2 := radius * radius
+	var hit := 0
+	for u in units:
+		if not u.alive():
+			continue
+		if ground_only and u.is_flying():
+			continue
+		if u.pos.distance_squared_to(tpos) > r2:
+			continue
+		u.apply_effect(_make_slow_effect(sid, eff, dur, sp, caster.owner_id))
+		hit += 1
+	# 反馈：一圈随落点扩散的黏液光。半径给 0.6 倍是为了**看起来像「网撒下去」**
+	# 而不是「一个实心圆盖住」，实心圆会和心灵风暴的圈混淆。
+	_add_effect(tpos, radius * 0.6, Color(0.62, 0.88, 0.74, 0.85), 0.35)
+
+## 组装一份「减速 / 降射速」效果。
+##
+## ⚠️ 抽成函数是为了让**三个产出方**（一次性施法、持久区域续期、
+##    联机快照重建）读同一份字段名。分开手写的话，某一边少写一个
+##    `atk_cd_mult`，症状是「移速慢了但射速没慢」—— 数值对不上，
+##    而界面上两个效果环长得一模一样。
+func _make_slow_effect(sid: String, kind: String, dur: float, sp: Dictionary,
+		owner: int) -> Dictionary:
+	return {
+		"id": sid, "kind": kind,
+		"remain": dur, "duration": dur,
+		"owner": owner,
+		"slow_mult": float(sp.get("slow_mult", 1.0)),
+		"atk_cd_mult": float(sp.get("atk_cd_mult", 1.0)),
+	}
 
 func _try_heal(medic: Unit, target) -> bool:
 	if target == null or not (target is Unit):
@@ -2529,14 +2592,63 @@ func _ai_cast_spells() -> void:
 					if t != null:
 						cmd_ability([u], sid, t)
 				"ground_aoe":
-					if String(sp.get("effect", "")) == "no_ranged":
-						var d: Variant = _ai_swarm_spot(u, sp)
-						if d != null:
-							cmd_ability([u], sid, d)
+					# ⚠️ 三个 ground_aoe 法术的**落点判据互不相同**，所以按
+					#    `effect` 分派，而不是笼统地「凡 ground_aoe 都找敌群中心」。
+					#    漏掉一个分支的后果是「那个技能 AI 永远不放」——
+					#    不报错、不崩，只是白造了一个施法单位。
+					var eff := String(sp.get("effect", ""))
+					var spot: Variant = null
+					if eff == "no_ranged":
+						spot = _ai_swarm_spot(u, sp)
+					elif eff == "slow":
+						spot = _ai_ensnare_spot(u, sp)
 					else:
-						var s: Variant = _ai_storm_spot(u, sp)
-						if s != null:
-							cmd_ability([u], sid, s)
+						spot = _ai_storm_spot(u, sp)
+					if spot != null:
+						cmd_ability([u], sid, spot)
+
+## 诱捕网的落点：**净收益最大**的地方（抓到的敌人 − 被牵连的自己人）。
+##
+## ⚠️ 判据和心灵风暴**故意不一样**，不是偷懒复用。
+##    风暴是「圈里一个自己人都不能有」—— 因为它**会打死自己人**，
+##    多烧一个敌人赔上两个陆战队员是纯亏，不存在「划算」的可能。
+##    诱捕网**不造成任何伤害**，代价只是「自己人也慢 25 秒、射速也降」，
+##    所以它该算**净收益**：抓到 3 个敌人、牵连 1 个自己人，仍然是赚的。
+##
+##    套用风暴那条「零容忍」判据的话，两军一接触它就永远不放了 ——
+##    而那时候恰恰是最该放的时候。这是「同一个 kind 的两个法术，
+##    判据必须分开写」的一个具体例子。
+##
+## 返回 `Vector2`，没有值得放的位置时返回 `null`。
+func _ai_ensnare_spot(caster: Unit, sp: Dictionary) -> Variant:
+	var reach := float(sp.get("cast_range", 0.0))
+	var r := float(sp.get("radius", 40.0))
+	var r2 := r * r
+	var foes := units_of(PLAYER)
+	var mine := units_of(ENEMY)
+	var best: Variant = null
+	# 从「门槛减一」起步，所以最后选中的位置必定 `score >= AI_ENSNARE_MIN_SCORE`。
+	var best_score := AI_ENSNARE_MIN_SCORE - 1
+	for e in foes:
+		if caster.pos.distance_to(e.pos) > reach:
+			continue
+		var n_foe := 0
+		for o in foes:
+			if o.pos.distance_squared_to(e.pos) <= r2:
+				n_foe += 1
+		var n_mine := 0
+		for f in mine:
+			if f.pos.distance_squared_to(e.pos) <= r2:
+				n_mine += 1
+		var score := n_foe - n_mine
+		if score > best_score:
+			best_score = score
+			best = e.pos
+	return best
+
+## AI 放诱捕网的最低净收益。定成 2 而不是 3：
+## 一次 75 点能量（虫后满能量 200，只够放两次），门槛太高等于这个技能不存在。
+const AI_ENSNARE_MIN_SCORE := 2
 
 ## 心灵风暴的落点：敌方单位最密的地方，且**自己人一个都不在圈里**。
 ## 返回 `Vector2`，没有值得放的位置时返回 `null`。

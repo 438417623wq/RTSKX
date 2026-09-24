@@ -148,6 +148,27 @@ func slow_mult() -> float:
 			m *= float(d.get("slow_mult", 1.0))
 	return m
 
+## 攻速倍率（**乘在冷却时间上**，所以 >1 = 变慢）。
+##
+## 星际 1 的诱捕网不只是「走得慢」——它同时把**武器冷却 +25%**，
+## 也就是把对方的输出砍掉五分之一。漏掉这一条的话，「诱捕网」就只剩
+## 一个减速，而它在原作里真正的价值是「让对方这 25 秒打不出伤害」。
+##
+## ⚠️ 和 `slow_mult()` 分开写、而不是合成一个 `spell_mult()`：
+##    两者读的字段不同（`slow_mult` / `atk_cd_mult`），而且**取不到时
+##    的缺省值方向相反** —— 移速缺省是 ×1.0（不变），攻速缺省也是 ×1.0
+##    （冷却不变）。合并成一个函数后，任何一处加字段都会同时影响另一边，
+##    而症状是「减速顺手把射速也改了」，很难查。
+func atk_cd_mult() -> float:
+	if effects.is_empty():
+		return 1.0
+	var m := 1.0
+	for e in effects:
+		var d: Dictionary = e
+		if String(d.get("kind", "")) == "slow":
+			m *= float(d.get("atk_cd_mult", 1.0))
+	return m
+
 func clear_effects() -> void:
 	effects.clear()
 
@@ -396,9 +417,14 @@ func weapon_kind() -> String:
 func cooldown_time() -> float:
 	var c := float(data.get("cooldown", 1.0))
 	if mode == "sieged":
-		return float(GameData.get_ability("siege").get("attack_cooldown", c))
-	if buffs.has("stim"):
+		c = float(GameData.get_ability("siege").get("attack_cooldown", c))
+	elif buffs.has("stim"):
 		c *= float(GameData.get_ability("stim").get("attack_cooldown_mult", 1.0))
+	# 法术降射速（诱捕网）。**放在最后乘** —— 这样攻城模式也吃这一条：
+	# 「展开之后就不怕诱捕网」在星际 1 里没有这回事。
+	# ⚠️ 原写法是 `if mode == "sieged": return ...` 直接返回，加在后面等于
+	#    永远轮不到。这里改成了赋值，行为对 siege 之外的单位**完全不变**。
+	c *= atk_cd_mult()
 	return c
 
 ## 形态切换期间不能开火 —— 否则攻城坦克可以在展开动画里继续输出，

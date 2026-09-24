@@ -573,11 +573,26 @@ static func apply_snapshot(w: World, data: PackedByteArray) -> Dictionary:
 			var erem := r.u16r()
 			if eid == "":
 				continue
+			# ⚠️ 效果**参数从本地法术表重建**，不要指望跟着快照传。
+			#    快照里只有「谁 + 哪一类 + 还剩多久」（见 `encode_snapshot`），
+			#    因为参数（减速倍率 / 攻速倍率）是**静态数值**，两边都有表。
+			#    漏掉这一步的症状是「客户端的单位看起来一点都没被减速」——
+			#    而客户端不跑 `step()`，位置由快照纠正，所以**连错位都看不出来**，
+			#    只是客户端的表现层（速度 / 动画 / 未来的剩余时间条）全是错的。
+			#    M5 时 `slow` 还没有产出方，这条路径一直是空的；
+			#    M6 的诱捕网是第一个真正走到这里的法术。
+			#
+			# ⚠️ `dps` / `spread_radius` **故意不重建**：伤害是主机权威的，
+			#    客户端要是也拿到 dps，一旦将来有人在客户端跑 `step()`，
+			#    就会变成两边各算一次 dot = 双倍伤害。
+			var esp := GameData.get_spell(eid)
 			efs.append({
 				"id": eid,
 				"kind": String(EFFECT_KINDS[clampi(ki, 0, EFFECT_KINDS.size() - 1)]),
 				"remain": float(erem) / 100.0,
-				"duration": float(erem) / 100.0,
+				"duration": float(esp.get("duration", float(erem) / 100.0)),
+				"slow_mult": float(esp.get("slow_mult", 1.0)),
+				"atk_cd_mult": float(esp.get("atk_cd_mult", 1.0)),
 			})
 		var tid := unit_type_id(ti)
 		if tid == "":

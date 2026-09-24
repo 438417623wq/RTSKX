@@ -58,10 +58,10 @@ def run_spell():
     return fails, total
 
 
-## 基线：tests/Spell.gd 正常跑完应该是 55 条断言。
+## 基线：tests/Spell.gd 正常跑完应该是 98 条断言。
 ## 改坏代码后如果连这个数都跑不到，说明**脚本没跑起来**（编译不过 / 提前崩），
 ## 而不是「断言没打红」—— 这两件事必须区分开。
-BASELINE_ASSERTS = 55
+BASELINE_ASSERTS = 98
 
 
 def ran_count(total):
@@ -195,6 +195,129 @@ def c10():
           '	var spread := float(e.get("spread_radius", 0.0))\n'
           '	if spread >= 0.0:\n'
           '		return\n')
+
+
+# ---------------------------------------------------------------- M6：诱捕网
+
+
+@control("C11 诱捕网改成持久区域（每帧重新判定谁在圈里）",
+         "后来才进入区域的单位完全不受影响")
+def c11():
+    # ① 不再走「一次性命中」分支 → 像黑暗虫群那样落下一个持久区域
+    patch(WORLD,
+          '			if bool(sp.get("instant", false)):\n'
+          '				_apply_instant_aoe(caster, sid, sp, tpos)\n'
+          '				return\n',
+          '')
+    # ② 让区域每帧给圈内单位续一份短促的减速（照 `_zone_refresh_no_ranged` 的写法）
+    patch(WORLD,
+          '		elif String(z.get("effect", "")) == "no_ranged":\n'
+          '			_zone_refresh_no_ranged(z)\n',
+          '		elif String(z.get("effect", "")) == "no_ranged":\n'
+          '			_zone_refresh_no_ranged(z)\n'
+          '		elif String(z.get("effect", "")) == "slow":\n'
+          '			_zone_refresh_slow(z)\n')
+    # ③ 补上那个续期函数。**必须用显式类型的局部变量接 `z["pos"]`** ——
+    #    直接把它当 `Vector2` 参数传进去会触发类型检查告警，而本项目把告警当错误。
+    patch(WORLD,
+          'func _tick_unit_effects(delta: float) -> void:',
+          'func _zone_refresh_slow(z: Dictionary) -> void:\n'
+          '	var zp: Vector2 = z["pos"]\n'
+          '	for u in query_units_near(zp, float(z["radius"])):\n'
+          '		u.apply_effect({"id": String(z["id"]), "kind": "slow", "remain": 0.35,\n'
+          '			"duration": 0.35, "slow_mult": 0.5, "atk_cd_mult": 1.25})\n'
+          '\n'
+          'func _tick_unit_effects(delta: float) -> void:')
+
+
+@control("C12 只减速、不降射速（漏掉 atk_cd_mult）",
+         "诱捕网同时让武器冷却 +25%")
+def c12():
+    patch(WORLD,
+          '		"slow_mult": float(sp.get("slow_mult", 1.0)),\n'
+          '		"atk_cd_mult": float(sp.get("atk_cd_mult", 1.0)),\n',
+          '		"slow_mult": float(sp.get("slow_mult", 1.0)),\n')
+
+
+@control("C13 诱捕网只抓地面（对空无效）", "空中单位同样被抓")
+def c13():
+    # ⚠️ 锚点必须带上下两行：`var ground_only := ...` 这一句在 World.gd 里
+    #    出现了三次（区域伤害 / 虫群续期 / 一次性施法），
+    #    只给单行的话 `patch()` 会改掉**第一处**，改错地方。
+    patch(WORLD,
+          '	var ground_only := String(sp.get("affects", "all")) == "all_ground"\n'
+          '	var r2 := radius * radius\n'
+          '	var hit := 0\n',
+          '	var ground_only := true\n'
+          '	var r2 := radius * radius\n'
+          '	var hit := 0\n')
+
+
+@control("C14 AI 用心灵风暴的零容忍判据挑诱捕网落点",
+         "圈里有一个自己人、但有四个敌人时 AI 仍然放")
+def c14():
+    patch(WORLD,
+          '		var score := n_foe - n_mine\n'
+          '		if score > best_score:\n',
+          '		if n_mine > 0:\n'
+          '			continue\n'
+          '		var score := n_foe - n_mine\n'
+          '		if score > best_score:\n')
+
+
+@control("C15 快照不重建减速参数（客户端解出来不减速）",
+         "客户端从本地法术表重建减速倍率与攻速倍率")
+def c15():
+    # 还原成 M6 之前的样子：只传 id / kind / remain
+    patch(NET,
+          '			var esp := GameData.get_spell(eid)\n'
+          '			efs.append({\n'
+          '				"id": eid,\n'
+          '				"kind": String(EFFECT_KINDS[clampi(ki, 0, EFFECT_KINDS.size() - 1)]),\n'
+          '				"remain": float(erem) / 100.0,\n'
+          '				"duration": float(esp.get("duration", float(erem) / 100.0)),\n'
+          '				"slow_mult": float(esp.get("slow_mult", 1.0)),\n'
+          '				"atk_cd_mult": float(esp.get("atk_cd_mult", 1.0)),\n'
+          '			})\n',
+          '			efs.append({\n'
+          '				"id": eid,\n'
+          '				"kind": String(EFFECT_KINDS[clampi(ki, 0, EFFECT_KINDS.size() - 1)]),\n'
+          '				"remain": float(erem) / 100.0,\n'
+          '				"duration": float(erem) / 100.0,\n'
+          '			})\n')
+
+
+@control("C16 诱捕网按阵营过滤（不再敌我不分）",
+         "圈内的自己人也一样被减速")
+def c16():
+    patch(WORLD,
+          '	for u in units:\n'
+          '		if not u.alive():\n'
+          '			continue\n'
+          '		if ground_only and u.is_flying():\n',
+          '	for u in units:\n'
+          '		if not u.alive():\n'
+          '			continue\n'
+          '		if u.owner_id == caster.owner_id:\n'
+          '			continue\n'
+          '		if ground_only and u.is_flying():\n')
+
+
+@control("C17 攻速倍率写在攻城模式的提前 return 之后",
+         "攻城模式下诱捕网同样让冷却")
+def c17():
+    # 还原成 M5 之前的写法：`if mode == "sieged": return ...` —— 提前返回，
+    # 后面那句 `c *= atk_cd_mult()` 永远轮不到。代码能编译、普通兵种也正常，
+    # 只有「展开的攻城坦克」这一条会红。
+    patch(UNIT,
+          '	if mode == "sieged":\n'
+          '		c = float(GameData.get_ability("siege").get("attack_cooldown", c))\n'
+          '	elif buffs.has("stim"):\n'
+          '		c *= float(GameData.get_ability("stim").get("attack_cooldown_mult", 1.0))\n',
+          '	if mode == "sieged":\n'
+          '		return float(GameData.get_ability("siege").get("attack_cooldown", c))\n'
+          '	if buffs.has("stim"):\n'
+          '		c *= float(GameData.get_ability("stim").get("attack_cooldown_mult", 1.0))\n')
 
 
 def main():

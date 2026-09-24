@@ -1,8 +1,8 @@
 extends SceneTree
 
-## 战场法术与状态效果测试（M5）。
+## 战场法术与状态效果测试（M5 + M6）。
 ##
-## 锁死五条铁律：
+## 锁死七条铁律：
 ##   1. **dot 按固定间隔结算**，不随帧率漂移 —— 每帧扣 `dps * delta` 的话，
 ##      跳数会随帧率变，而 `take_damage` 里有 `maxf(1.0, ...)` 的地板，
 ##      跳数越多总伤害越高（144 帧下 28 dps 会变成 144 点/秒）。
@@ -13,10 +13,17 @@ extends SceneTree
 ##   4. **同源效果不叠加**，只刷新时长；不同源可以并存。
 ##   5. **状态效果与法术区域都要能跨快照往返**（联机）——
 ##      不传的话客户端看到的是「主机的兵在掉血、画面上什么都没有」。
+##   6. **诱捕网是一次性施法，效果跟着单位走**（M6）—— 和「留在战场上的
+##      持久区域」是两种东西：被抓到的兵跑出圈照样慢满 25 秒，
+##      后来才走进圈的完全不受影响。做成持久区域会强得离谱。
+##   7. **诱捕网同时降移速和降射速**（移速 ×0.5 / 武器冷却 ×1.25）——
+##      漏掉射速那一条的话，它就只剩一个减速，
+##      而它在原作里真正的价值是「把对方的输出砍掉五分之一」。
 ##
 ## ⚠️ 每条「做不到 X」的断言都配了阳性对照。
 ##    尤其是「黑暗虫群挡住了远程」：把 `blocked_by_dark_swarm` 直接 return true
 ##    也能让它通过，所以必须同时证明「近战真的打得到」。
+##    同理「诱捕网的效果跟着单位走」配了**持久区域的镜像对照**（走出去就失效）。
 
 var _pass := 0
 var _fail := 0
@@ -55,6 +62,18 @@ func _init() -> void:
 	_test_snapshot_zones()
 	print("  ---- 第七组：AI 不自杀 ----")
 	_test_ai_no_friendly_fire()
+	print("  ---- 第八组：诱捕网（M6）----")
+	_test_ensnare_tables()
+	_test_ensnare_instant()
+	_test_ensnare_hits_all()
+	_test_ensnare_follows_unit()
+	_test_ensnare_slows_and_dps()
+	_test_ensnare_sieged_tank()
+	_test_ensnare_no_damage()
+	_test_ensnare_out_of_range()
+	_test_ensnare_expires()
+	_test_snapshot_ensnare()
+	_test_ai_ensnare()
 	print("--------------------------------------------")
 	print("  通过 %d / 失败 %d" % [_pass, _fail])
 	quit(0 if _fail == 0 else 1)
@@ -126,6 +145,42 @@ func _per_tick(sp: Dictionary, unit: Unit) -> float:
 	return GameData.compute_damage(base, String(sp.get("damage_type", "normal")),
 		String(unit.data.get("armor_type", "light")), int(unit.data.get("armor", 0)))
 
+## 某个效果的剩余秒数，没有则返回 -1。
+##
+## ⚠️ 不要写 `u.effects[0]` —— 单位身上可能同时挂着别的效果，
+##    下标取到哪一个取决于插入顺序。这种「碰巧对了」的断言在
+##    加一个新法术之后会突然变红，而且看起来像新法术的问题。
+func _remain_of(u: Unit, id: String) -> float:
+	for e in u.effects:
+		var d: Dictionary = e
+		if String(d.get("id", "")) == id:
+			return float(d.get("remain", -1.0))
+	return -1.0
+
+## 场上带某个效果的单位数量。
+##
+## ⚠️ 诱捕网是**一次性施法**，`spell_zones` 永远是空的 ——
+##    「AI 有没有放」不能靠查区域，只能靠查单位身上的效果。
+##    写错的话，AI 施法测试会变成「永远为假」的断言。
+func _any_effect(w: World, id: String) -> int:
+	var n := 0
+	for u in w.units:
+		if u.has_effect(id):
+			n += 1
+	return n
+
+## 这个单位 / 建筑有没有专属造型（而不是落进兜底圆盘）。
+##
+## 兜底是**静默**的 —— 落进去了既不报错也不崩，只是长得像个圆球，
+## 只有跑截图才看得见。所以必须有一条断言守着。
+func _sprite_ok(id: String) -> bool:
+	var c := Color(0.5, 0.5, 0.5)
+	if GameData.get_unit(id).is_empty():
+		GenTex.building_sprite(id, c, c, c)
+	else:
+		GenTex.unit_sprite(id, c, c, c)
+	return not GenTex.last_was_fallback
+
 # ================================================================ 第一组：数据表自洽
 
 func _test_tables() -> void:
@@ -178,7 +233,7 @@ func _test_five_tables() -> void:
 		elif String(GameData.get_building(trainer).get("faction", "")) \
 				!= String(GameData.get_unit(uid).get("faction", "")):
 			bad.append("%s 被异族建筑 %s 训练" % [uid, trainer])
-	_report("三个施法单位都进了五张表（可造 + 有升级分类）", bad.is_empty(), "; ".join(bad))
+	_report("每个法术的施法单位都进了五张表（可造 + 有升级分类）", bad.is_empty(), "; ".join(bad))
 
 	# 科学球在天上 —— 漏掉 AIR_RULES 的话它会被地面近战追着打。
 	_report("科学球是空中单位", GameData.is_flying("science_vessel"),
@@ -661,3 +716,380 @@ func _test_ai_no_friendly_fire() -> void:
 	w3._ai_cast_spells()
 	_report("AI 不会为了一个敌人浪费 75 点能量（门槛 %d）" % World.AI_STORM_MIN_HITS,
 		w3.spell_zones.is_empty(), "区域 %d 个" % w3.spell_zones.size())
+
+# ================================================================ 第八组：诱捕网（M6）
+
+## 数据表自洽 + 科技链门槛。
+##
+## ⚠️ 这一组里最值钱的两条是「虫后是空中单位」和「巢穴挂在尖塔下面」——
+##    两条都**不报错**，症状分别是「虫后在地上被跳虫围死」和
+##    「虫后开局就能造、早期没有制衡」。
+func _test_ensnare_tables() -> void:
+	var bad: Array = []
+	var d := GameData.get_unit("queen")
+	if d.is_empty():
+		bad.append("queen 不在 UNITS 里")
+	else:
+		if float(d.get("damage", 0)) > 0.0:
+			bad.append("虫后有攻击力（会去索敌，不该肉搏）")
+		if String(d.get("role", "")) != "support":
+			bad.append("虫后 role 不是 support")
+		if float(d.get("energy", 0.0)) <= 0.0:
+			bad.append("虫后没有能量")
+	_report("虫后是零伤害的支援单位", bad.is_empty(), "; ".join(bad))
+	_report("★虫后是空中单位（漏了会被地面近战围死）★", GameData.is_flying("queen"),
+		"AIR_RULES.queen.flying")
+	_report("虫后有升级分类", GameData.UPGRADE_CLASS.has("queen"),
+		String(GameData.UPGRADE_CLASS.get("queen", "")))
+
+	var nest := GameData.get_building("queen_nest")
+	_report("虫后巢穴能训练虫后",
+		(nest.get("trains", []) as Array).has("queen")
+			and String(nest.get("faction", "")) == "zerg",
+		"trains=%s" % str(nest.get("trains", [])))
+	# ⚠️ `requires` 必须是 spire，不能是 hive —— hive 是虫族**起始建筑**，
+	#    写 hive 等于零门槛。而这条**不会报错**：科技树看着是对的，
+	#    只是虫后从第一秒就能造。
+	_report("★虫后巢穴挂在尖塔下面，而不是起始的虫巢（否则零门槛）★",
+		String(nest.get("requires", "")) == "spire", String(nest.get("requires", "")))
+
+	# 建造菜单**同时**驱动玩家菜单（`Main._draw_build_menu`）和 AI 建造顺序
+	# （`World._ai_produce`）。不在菜单里 = 玩家看不见、AI 也不会造 =
+	# 虫后和诱捕网变成永远见不到的死内容。
+	var menu_ids: Array = []
+	for entry in GameData.BUILD_MENU["zerg"]:
+		menu_ids.append(String((entry as Dictionary)["id"]))
+	_report("★虫后巢穴在虫族建造菜单里（不在菜单 = 玩家和 AI 都造不出来）★",
+		menu_ids.has("queen_nest"), ", ".join(menu_ids))
+
+	_report("虫后有专属造型（不落兜底圆盘）", _sprite_ok("queen"), "")
+	_report("虫后巢穴有专属造型（不落兜底圆盘）", _sprite_ok("queen_nest"), "")
+
+## 一次性施法的基本形态：扣能量、**不留区域**、圈内挂满时长效果、冷却生效。
+func _test_ensnare_instant() -> void:
+	var sp := GameData.get_spell("ensnare")
+	var w := _arena("zerg", "zerg")
+	var m := _mid(w)
+	var q := _put(w, "queen", m, World.PLAYER)
+	var spot := m + Vector2(120, 0)
+	var u := _put(w, "hydralisk", spot, World.ENEMY)
+	var e0: float = q.energy
+	var need := float(sp.get("energy", 0.0))
+	var ok := w.cmd_ability([q], "ensnare", spot)
+	_report("诱捕网落下、扣能量、且**不留下持久区域**",
+		ok and absf(q.energy - (e0 - need)) < 0.001 and w.spell_zones.is_empty(),
+		"能量 %.0f → %.0f，区域 %d 个" % [e0, q.energy, w.spell_zones.size()])
+	var dur := float(sp.get("duration", 0.0))
+	_report("圈内单位被挂上**满时长**的减速效果",
+		u.has_effect("ensnare") and absf(_remain_of(u, "ensnare") - dur) < 0.001,
+		"剩余 %.1f / 时长 %.1f" % [_remain_of(u, "ensnare"), dur])
+	_report("冷却期内不能重复施放（防触屏连点倒空能量）",
+		not w.cmd_ability([q], "ensnare", spot + Vector2(10, 0)), "")
+
+## 影响范围：**敌我不分 + 对空也有效 + 圈外不受影响**。
+##
+## ⚠️ 靶子一律摆到互相够不着的距离，而且这一组**不跑模拟** ——
+##    跑了的话战斗伤害会混进来（M5 的心灵风暴测试就踩过「靶子自己打起来」）。
+func _test_ensnare_hits_all() -> void:
+	var sp := GameData.get_spell("ensnare")
+	var r := float(sp.get("radius", 0.0))
+	var w := _arena("zerg", "zerg")
+	var m := _mid(w)
+	var q := _put(w, "queen", m, World.PLAYER)
+	var spot := m + Vector2(120, 0)
+	var foe_g := _put(w, "probe", spot + Vector2(-55, 0), World.ENEMY)
+	var mate_g := _put(w, "probe", spot + Vector2(55, 0), World.PLAYER)
+	var foe_air := _put(w, "mutalisk", spot + Vector2(0, -55), World.ENEMY)
+	# 圈外：半径 80，摆到 95 —— 差一点点也要挡住，否则「范围」是个摆设
+	var outside := _put(w, "probe", spot + Vector2(r + 15.0, 0), World.ENEMY)
+	var ok := w.cmd_ability([q], "ensnare", spot)
+	_report("诱捕网施放成功（前提）", ok, "")
+	_report("圈内的敌人被减速", foe_g.has_effect("ensnare"), _fx(foe_g))
+	_report("★圈内的自己人也一样被减速（敌我不分，星际 1 的原样行为）★",
+		mate_g.has_effect("ensnare"), _fx(mate_g))
+	# ★对空★ —— 星际 1 的原文是「覆盖区域内**任何**未潜伏单位」，
+	# 而且明确提到飞行单位的转向/加速也变慢。
+	# 写成「只抓地面」的话，诱捕网对空军的价值直接归零，而且不报错。
+	_report("★空中单位同样被抓（诱捕网对空也有效）★", foe_air.has_effect("ensnare"),
+		_fx(foe_air))
+	_report("圈外的单位不受影响", not outside.has_effect("ensnare"), _fx(outside))
+	# 施法者自己站在 120px 外（>80），不该被自己的网抓住
+	_report("施法者自己不在圈里就不受影响", not q.has_effect("ensnare"), _fx(q))
+
+## ★本组最重要的一条★ —— 诱捕网和「持久区域」的分水岭。
+##
+## 直接调 `_apply_instant_aoe` 的两种机制对照：
+##   · 诱捕网（instant）  → 效果挂在单位身上，走出圈**照样**慢满 25 秒；
+##   · 黑暗虫群（区域）   → 效果靠 `NO_RANGED_LINGER` 每帧续期，走出圈**立刻**失效。
+##
+## ⚠️ 只断言前一半是不够的：如果「效果列表根本不会掉」，
+##    前一半也会通过。必须配一个**镜像对照**证明这套判据真的能分辨两种机制。
+func _test_ensnare_follows_unit() -> void:
+	var w := _arena("zerg", "zerg")
+	var m := _mid(w)
+	var q := _put(w, "queen", m, World.PLAYER)
+	var spot := m + Vector2(120, 0)
+	var caught := _put(w, "probe", spot, World.ENEMY)
+	var late := _put(w, "probe", spot + Vector2(300, 0), World.ENEMY)
+	var ok := w.cmd_ability([q], "ensnare", spot)
+	_report("诱捕网测试场：圈内单位真的被抓到了（前提）",
+		ok and caught.has_effect("ensnare"), _fx(caught))
+	# 被抓到的兵跑出圈；一个后来才走进圈里的兵补位
+	caught.pos = spot + Vector2(600, 0)
+	late.pos = spot
+	_run(w, 1.0)
+	_report("★被抓到的单位跑出区域后仍然减速（效果跟着单位走）★",
+		caught.has_effect("ensnare") and absf(caught.slow_mult() - 0.5) < 0.001,
+		"%s，slow_mult %.2f" % [_fx(caught), caught.slow_mult()])
+	_report("★后来才进入区域的单位完全不受影响（它不是持久区域）★",
+		not late.has_effect("ensnare"), _fx(late))
+
+	# ---- 镜像对照：持久区域（黑暗虫群）**必须**相反 ----
+	#
+	# ⚠️★这里必须**先推进一帧**★。持久区域是「每帧重新判定谁在圈里」，
+	#    `cmd_ability` 只是把区域放进 `spell_zones`，真正挂效果的是
+	#    `_tick_spell_zones` —— 它在 `step()` 里。施法完直接查的话，
+	#    区域存在、效果一个都没有，下面那条「走出圈就失去免疫」于是
+	#    **恒真**（因为它本来就从来没被挂上过），
+	#    整条镜像对照变成一条什么都证明不了的假阳性。
+	#    诱捕网（一次性）不需要这一步 —— 这正是两种机制的区别本身。
+	var w2 := _arena("zerg", "zerg")
+	var m2 := _mid(w2)
+	var df := _put(w2, "defiler", m2, World.PLAYER)
+	var spot2 := m2 + Vector2(120, 0)
+	var out := _put(w2, "probe", spot2, World.ENEMY)
+	w2.cmd_ability([df], "dark_swarm", spot2)
+	_run(w2, 0.05)
+	_report("持久区域对照：虫群落下时圈内地面单位被标记（前提）",
+		out.has_effect("dark_swarm"), _fx(out))
+	out.pos = spot2 + Vector2(600, 0)
+	_run(w2, 1.0)
+	_report("★持久区域对照：走出虫群的单位会失去免疫★（证明上面那条不是恒真）",
+		not out.has_effect("dark_swarm"), _fx(out))
+
+## 移速 ×0.5 **和** 武器冷却 ×1.25。
+##
+## ⚠️ 后半条是最容易漏的：只做减速的话，诱捕网看起来「实现了」，
+##    但它真正的战术价值（把对方输出砍掉五分之一）完全没有。
+##    而且两个效果用的是**同一个 kind**（`slow`），漏了不会有任何报错。
+func _test_ensnare_slows_and_dps() -> void:
+	var sp := GameData.get_spell("ensnare")
+	var w := _arena("zerg", "zerg")
+	var m := _mid(w)
+	var q := _put(w, "queen", m, World.PLAYER)
+	var spot := m + Vector2(120, 0)
+	var u := _put(w, "hydralisk", spot, World.ENEMY)
+	var base_spd: float = u.speed()
+	var base_cd: float = u.cooldown_time()
+	w.cmd_ability([q], "ensnare", spot)
+	var want_spd: float = base_spd * float(sp.get("slow_mult", 1.0))
+	var want_cd: float = base_cd * float(sp.get("atk_cd_mult", 1.0))
+	_report("诱捕网让移速减半",
+		absf(u.speed() - want_spd) < 0.01,
+		"%.1f → %.1f（期望 %.1f）" % [base_spd, u.speed(), want_spd])
+	_report("★诱捕网同时让武器冷却 +25%（射速变慢）★",
+		absf(u.cooldown_time() - want_cd) < 0.001,
+		"%.3f → %.3f（期望 %.3f）" % [base_cd, u.cooldown_time(), want_cd])
+	# 两个倍率必须**同时**来自同一条效果 —— 只挂一个字段的写法会让
+	# 其中一个悄悄退回 1.0，而界面上两个效果环长得一模一样。
+	_report("两个倍率都来自同一份效果（不是各挂一条）",
+		u.effects.size() == 1
+			and absf(u.slow_mult() - 0.5) < 0.001
+			and absf(u.atk_cd_mult() - 1.25) < 0.001,
+		"效果 %d 条，slow %.2f / atk_cd %.2f" % [u.effects.size(), u.slow_mult(),
+			u.atk_cd_mult()])
+
+## 诱捕网**不造成任何伤害**。
+##
+## 这条守着「误伤」的定义：它敌我不分，但代价只是「自己也慢了」。
+## 一旦有人在 SPELLS 的 ensnare 上加一个 `dps`，它就变成「敌我不分且会打死自己人」，
+## 而 AI 那边的判据是**按净收益**算的（允许牵连少量自己人）——
+## 两者一叠加，AI 就会开始屠杀自己的部队。**不报错**。
+func _test_ensnare_no_damage() -> void:
+	var sp := GameData.get_spell("ensnare")
+	_report("诱捕网的数据表里没有 dps（它不该有伤害）", not sp.has("dps"),
+		"dps=%s" % str(sp.get("dps", "无")))
+	var w := _arena("zerg", "zerg")
+	var m := _mid(w)
+	var q := _put(w, "queen", m, World.PLAYER)
+	var spot := m + Vector2(120, 0)
+	var foe := _put(w, "probe", spot + Vector2(-50, 0), World.ENEMY)
+	var mate := _put(w, "probe", spot + Vector2(50, 0), World.PLAYER)
+	var foe0: float = foe.hp + foe.shield
+	var mate0: float = mate.hp + mate.shield
+	w.cmd_ability([q], "ensnare", spot)
+	_run(w, float(sp.get("duration", 25.0)))
+	_report("整段时长内敌人一点血都没掉",
+		absf(foe0 - (foe.hp + foe.shield)) < 0.001,
+		"掉 %.3f" % (foe0 - (foe.hp + foe.shield)))
+	_report("整段时长内自己人也一点血都没掉（误伤只是「也慢了」）",
+		absf(mate0 - (mate.hp + mate.shield)) < 0.001,
+		"掉 %.3f" % (mate0 - (mate.hp + mate.shield)))
+
+func _test_ensnare_out_of_range() -> void:
+	var w := _arena("zerg", "zerg")
+	var m := _mid(w)
+	var q := _put(w, "queen", m, World.PLAYER)
+	var reach := float(GameData.get_spell("ensnare").get("cast_range", 0.0))
+	var far := _put(w, "probe", m + Vector2(reach + 200.0, 0), World.ENEMY)
+	var e0: float = q.energy
+	var ok_far := w.cmd_ability([q], "ensnare", m + Vector2(reach + 120.0, 0))
+	# 施法失败**必须一个能量都不扣** —— 扣了的话，玩家点了远处一下，
+	# 技能没放出去但能量没了，看起来像「能量凭空消失」。
+	_report("超出施法距离放不出来（且不扣能量、不抓人）",
+		(not ok_far) and absf(q.energy - e0) < 0.001 and (not far.has_effect("ensnare")),
+		"返回 %s，能量 %.0f" % [str(ok_far), q.energy])
+	var ok_near := w.cmd_ability([q], "ensnare", m + Vector2(reach - 40.0, 0))
+	_report("距离内放得出来", ok_near, "")
+
+func _test_ensnare_expires() -> void:
+	var sp := GameData.get_spell("ensnare")
+	var dur := float(sp.get("duration", 0.0))
+	var w := _arena("zerg", "zerg")
+	var m := _mid(w)
+	var q := _put(w, "queen", m, World.PLAYER)
+	var spot := m + Vector2(120, 0)
+	# ⚠️ 靶子用**蝎子**（地面、零攻击力）而不是虫后 —— 这一条只该管「时长」，
+	#    用空中靶子的话，「对空失效」这个无关缺陷也会把它打红，
+	#    阳性对照里就分不清是哪一条规则破了。
+	#    用零攻击力单位是为了不跑出战斗伤害（这一条要跑满 25 秒模拟）。
+	var u := _put(w, "defiler", spot, World.ENEMY)
+	w.cmd_ability([q], "ensnare", spot)
+	_run(w, dur - 1.0)
+	_report("时长内减速仍在（还没提前解除）",
+		u.has_effect("ensnare") and absf(u.slow_mult() - 0.5) < 0.001,
+		"剩 %.2f" % _remain_of(u, "ensnare"))
+	_run(w, 2.0)
+	_report("诱捕网在时长结束后解除，移速恢复正常",
+		(not u.has_effect("ensnare")) and absf(u.slow_mult() - 1.0) < 0.001,
+		"%s，slow_mult %.2f" % [_fx(u), u.slow_mult()])
+
+## ★「减速对攻城模式也生效」★
+##
+## `Unit.cooldown_time()` 原来的写法是 `if mode == "sieged": return ...` —— **提前返回**。
+## 把攻速倍率加在那个 return **之后**，代码看着像加上了，实际上永远轮不到，
+## 而症状是「展开的攻城坦克完全不受诱捕网影响」—— 不报错、不崩，
+## 甚至只看普通兵种的测试也全绿。所以必须专门测一次「展开状态」。
+func _test_ensnare_sieged_tank() -> void:
+	var w := _arena("zerg", "terran")
+	var m := _mid(w)
+	var q := _put(w, "queen", m, World.PLAYER)
+	var spot := m + Vector2(120, 0)
+	var tank := _put(w, "siege_tank", spot, World.ENEMY)
+	var base_n: float = tank.cooldown_time()
+	w.cmd_ability([q], "ensnare", spot)
+	var slow_n: float = tank.cooldown_time()
+	_report("普通模式下诱捕网让武器冷却 +25%",
+		absf(slow_n - base_n * 1.25) < 0.001, "%.3f → %.3f" % [base_n, slow_n])
+	# 切到攻城模式：冷却换成 `siege` 技能表里的那个值，然后**同样**要吃倍率
+	tank.set_mode("sieged")
+	var slow_s: float = tank.cooldown_time()
+	tank.clear_effects()
+	var base_s: float = tank.cooldown_time()
+	_report("展开确实换了另一套冷却（前提）", absf(base_s - base_n) > 0.001,
+		"普通 %.3f / 展开 %.3f" % [base_n, base_s])
+	_report("★攻城模式下诱捕网同样让冷却 +25%（倍率写在提前 return 之后会失效）★",
+		absf(slow_s - base_s * 1.25) < 0.001, "展开 %.3f → %.3f" % [base_s, slow_s])
+
+## 快照往返 + ★客户端从本地表重建效果参数★。
+##
+## 快照里只有「谁 + 哪一类 + 还剩多久」，`slow_mult` / `atk_cd_mult` **不传**。
+## 客户端必须靠 `id` 去本地 `GameData.SPELLS` 重建 ——
+## 漏掉的话客户端「看起来一点都没被减速」，而且**不报错**：
+## 客户端不跑 `step()`，位置由快照纠正，连错位都看不出来。
+func _test_snapshot_ensnare() -> void:
+	var w := _arena("zerg", "zerg")
+	var m := _mid(w)
+	var q := _put(w, "queen", m, World.PLAYER)
+	var spot := m + Vector2(120, 0)
+	var u := _put(w, "hydralisk", spot, World.ENEMY)
+	w.cmd_ability([q], "ensnare", spot)
+	_report("快照测试场：诱捕网真的挂上了（前提）", u.has_effect("ensnare"), _fx(u))
+	var b := World.new(64, 40, "zerg", "zerg", "easy")
+	b.units.clear()
+	b.buildings.clear()
+	b.resources.clear()
+	b.ai_enabled = false
+	b.local_owner = World.ENEMY
+	var bytes := Net.encode_snapshot(w, Net.Buf.new(), 7)
+	var res := Net.apply_snapshot(b, bytes)
+	var got: Unit = null
+	for x in b.units:
+		if x.type_id == "hydralisk":
+			got = x
+	_report("快照往返：减速效果原样还原",
+		bool(res["ok"]) and got != null and got.has_effect("ensnare"),
+		_fx(got) if got != null else "没有刺蛇")
+	if got == null:
+		_report("★客户端从本地表重建减速倍率与攻速倍率★", false, "单位没解出来")
+		return
+	_report("★客户端从本地法术表重建减速倍率与攻速倍率★",
+		absf(got.slow_mult() - 0.5) < 0.001 and absf(got.atk_cd_mult() - 1.25) < 0.001,
+		"slow %.2f / atk_cd %.2f" % [got.slow_mult(), got.atk_cd_mult()])
+	# 解出来的单位真的会变慢 —— 上面两条是「参数对不对」，
+	# 这一条是「参数有没有接到 speed() 上」。
+	_report("客户端解出来的单位速度真的减半",
+		absf(got.speed() - float(GameData.get_unit("hydralisk").get("speed", 0.0)) * 0.5) < 0.01,
+		"%.1f" % got.speed())
+
+## AI 的诱捕网落点判据：**净收益**（抓到的敌人 − 被牵连的自己人）≥ 2。
+##
+## ⚠️ 和心灵风暴的「零容忍」判据**故意不同**，理由见 `World._ai_ensnare_spot`。
+##    这里要证明的是「它真的按净收益算」，而不是「它压根没跑」——
+##    所以三条：该放的时候放、净收益不够的时候不放、自己人更多的时候不放。
+func _test_ai_ensnare() -> void:
+	# ① 敌人聚堆、自己人（虫后）在 120px 外 → 必须放
+	var w := _arena("zerg", "terran")
+	var m := _mid(w)
+	_put(w, "queen", m, World.ENEMY)
+	for i in range(4):
+		_put(w, "marine", m + Vector2(170.0 + 12.0 * float(i), 0), World.PLAYER)
+	w._rebuild_hash()
+	w._ai_cast_spells()
+	_report("AI 在敌人聚堆时会放诱捕网（阳性对照）",
+		_any_effect(w, "ensnare") >= 2, "被抓 %d 个" % _any_effect(w, "ensnare"))
+
+	# ② 只有一个敌人 → 不值得花 75 点能量
+	var w2 := _arena("zerg", "terran")
+	var m2 := _mid(w2)
+	_put(w2, "queen", m2, World.ENEMY)
+	_put(w2, "marine", m2 + Vector2(170, 0), World.PLAYER)
+	w2._rebuild_hash()
+	w2._ai_cast_spells()
+	_report("AI 不会为了一个敌人浪费 75 点能量（门槛 %d）" % World.AI_ENSNARE_MIN_SCORE,
+		_any_effect(w2, "ensnare") == 0, "被抓 %d 个" % _any_effect(w2, "ensnare"))
+
+	# ③ 自己的兵比敌人多 → 净收益为负，不许放。
+	#    ⚠️ 这一条是「净收益判据」和「零容忍判据」的分界线：
+	#       换成心灵风暴的判据（自己人一个都不能在圈里）它也会过，
+	#       所以必须再加一条「自己人**略少于**敌人时仍然放」（见 ①'）。
+	var w3 := _arena("zerg", "terran")
+	var m3 := _mid(w3)
+	_put(w3, "queen", m3, World.ENEMY)
+	for i in range(2):
+		_put(w3, "marine", m3 + Vector2(160.0 + 12.0 * float(i), 0), World.PLAYER)
+	for i in range(4):
+		_put(w3, "marine", m3 + Vector2(160.0 + 12.0 * float(i), 40.0), World.ENEMY)
+	w3._rebuild_hash()
+	w3._ai_cast_spells()
+	_report("★自己人比敌人多时 AI 不放（净收益为负）★",
+		_any_effect(w3, "ensnare") == 0, "被抓 %d 个" % _any_effect(w3, "ensnare"))
+
+	# ①' 关键对照：**圈里既有敌人又有自己人**，但敌人更多 → 仍然该放。
+	#     这一条是「净收益」区别于「零容忍」的唯一证据 ——
+	#     心灵风暴的判据在这里会拒绝施放，而诱捕网应该接受。
+	var w4 := _arena("zerg", "terran")
+	var m4 := _mid(w4)
+	_put(w4, "queen", m4, World.ENEMY)
+	for i in range(4):
+		_put(w4, "marine", m4 + Vector2(170.0 + 12.0 * float(i), 0), World.PLAYER)
+	_put(w4, "marine", m4 + Vector2(178.0, 14.0), World.ENEMY)
+	w4._rebuild_hash()
+	w4._ai_cast_spells()
+	var hit_friend := false
+	for u in w4.units:
+		if u.owner_id == World.ENEMY and u.type_id == "marine" and u.has_effect("ensnare"):
+			hit_friend = true
+	_report("★圈里有一个自己人、但有四个敌人时 AI 仍然放（净收益判据，不是零容忍）★",
+		_any_effect(w4, "ensnare") >= 3 and hit_friend,
+		"被抓 %d 个（含自己人 %s）" % [_any_effect(w4, "ensnare"), str(hit_friend)])

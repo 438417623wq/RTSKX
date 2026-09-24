@@ -173,6 +173,17 @@ const _BASE_UNITS := {
 		"build_time": 25.0, "size": 10.0,
 		"energy": 200.0, "abilities": ["dark_swarm"], "requires": "spire",
 	},
+	"queen": {
+		# 和星际 1 一样是**空中**施法单位：能跟队、不会被地面近战直接围死，
+		# 代价是它自己一点攻击力都没有。
+		"name": "虫后", "faction": "zerg", "role": "support",
+		"desc": "空中施法：诱捕网让区域内单位变慢",
+		"hp": 120, "shield": 0, "armor": 1, "armor_type": "medium",
+		"damage": 0, "damage_type": "normal", "range": 0.0, "cooldown": 1.0,
+		"speed": 90.0, "sight": 260.0, "cost_m": 100, "cost_g": 100, "supply": 2,
+		"build_time": 26.0, "size": 11.0,
+		"energy": 200.0, "abilities": ["ensnare"], "requires": "queen_nest",
+	},
 
 	# ---------- 神族 ----------
 	"probe": {
@@ -293,6 +304,12 @@ const _BASE_BUILDINGS := {
 		"size": 26.0, "cost_m": 200, "cost_g": 150, "build_time": 34.0, "sight": 200.0,
 		"trains": ["mutalisk", "defiler"], "requires": "spawning_pool", "pop_dist": 2.6,
 	},
+	"queen_nest": {
+		"name": "虫后巢穴", "faction": "zerg", "hp": 850, "armor": 2, "armor_type": "building",
+		"desc": "训练虫后（诱捕网）",
+		"size": 26.0, "cost_m": 150, "cost_g": 100, "build_time": 30.0, "sight": 180.0,
+		"trains": ["queen"], "requires": "spire", "pop_dist": 2.4,
+	},
 	"extractor": {
 		"name": "萃取房", "faction": "zerg", "hp": 600, "armor": 2, "armor_type": "building",
 		"desc": "建在瓦斯矿上，让工蜂采集瓦斯",
@@ -387,6 +404,13 @@ const BUILD_MENU := {
 		{"id": "extractor", "requires": null},
 		{"id": "spawning_pool", "requires": null},
 		{"id": "spire", "requires": "spawning_pool"},
+		# ⚠️ 虫后巢穴的 `requires` 是 **spire 而不是 hive**。
+		#    虫族的 `hive` 是**起始建筑**（见 FACTIONS.zerg.start_buildings），
+		#    写 `requires: "hive"` 等于没有任何门槛 —— 虫后开局就能造，
+		#    而它 25 秒的群体减速 + 降射速在早期是没有制衡的。
+		#    挂在 spire 下面和蝎子同一层，既符合「虫后是高科技兵种」，
+		#    也让这条科技线有真正的代价（200/150 的尖塔）。
+		{"id": "queen_nest", "requires": "spire"},
 		{"id": "evolution_chamber", "requires": null},
 		{"id": "spore_colony", "requires": "spawning_pool"},
 	],
@@ -504,6 +528,10 @@ const AIR_RULES := {
 	# ⚠️ 漏掉 `flying: true` 的话，科学球会变成一只「在地面上飘的胖球」，
 	#    而且会被地面近战单位锁定追打 —— 不报错，只是看起来很怪。
 	"science_vessel": {"flying": true},
+	# 虫后同样在**天上**、同样 damage 为 0 —— 理由和科学球一字不差。
+	# ⚠️ 忘了 `flying: true` 的话，虫后会在地面上飘着被跳虫围死，
+	#    而且「诱捕网」这个技能原本就是设计给「跟着大部队飞的支援单位」的。
+	"queen": {"flying": true},
 	# ---- 攻击型建筑 ----
 	"missile_turret": {"attack_air": true, "attack_ground": false},
 	"spore_colony":   {"attack_air": true, "attack_ground": false},
@@ -549,6 +577,10 @@ const UPGRADE_CLASS := {
 	"drone": "melee", "zergling": "melee",
 	"hydralisk": "missile", "roach": "missile",
 	"mutalisk": "air",
+	# 虫后也是空中单位，跟飞龙同一条线。
+	# ⚠️ 它和蝎子一样没有攻击力，但**表必须完整** —— 漏一个 id 就是
+	#    「升了级但没生效」，不报错，只是那 100 矿气白花。
+	"queen": "air",
 	# 蝎子是地面单位，吃地面远程那条线（虽然它本身没有攻击力，
 	# 但攻防升级表必须完整 —— 漏一个 id 就是「升了级但没生效」，不报错）。
 	"defiler": "missile",
@@ -735,6 +767,38 @@ const SPELLS := {
 		"energy": 75.0, "cast_range": 230.0,
 		"duration": 15.0, "dps": 12.0, "damage_type": "normal",
 		"splash_radius": 44.0, "cooldown": 1.0,
+	},
+	"ensnare": {
+		"name": "诱捕网", "unit": "queen", "kind": "ground_aoe",
+		"desc": "黏液网：范围内单位移速减半、射速变慢",
+		# 数值照星际 1：能量 75 / 持续 25.2 秒 / 区域 128×128px / 移速 ×0.5。
+		"energy": 75.0, "cast_range": 200.0, "radius": 80.0,
+		"duration": 25.0, "effect": "slow",
+		"slow_mult": 0.5,
+		# ★`instant: true` —— 这是本项目和另两个 ground_aoe 法术的**分水岭**★
+		#
+		#    心灵风暴 / 黑暗虫群是「**留在战场上的圈**」：圈自己倒计时，
+		#    每帧重新判定谁在圈里，人走进来就中招、走出去就没事。
+		#
+		#    诱捕网不是。它在**放下去的那一瞬间**把圈里每个单位抓一遍，
+		#    效果随后**跟着单位走** —— 被抓到的兵跑出圈了照样慢满 25 秒，
+		#    而后来才走进这片区域的兵一点事都没有。这正是星际 1 的行为。
+		#
+		#    ⚠️ 做成持久区域的话，它就变成「25 秒内谁进圈谁变慢」——
+		#       比原作强得多，而且和「移速减半持续 25 秒」这条数值对不上。
+		"instant": true,
+		# 星际 1 的 Ensnare 还把**武器冷却 +25%**（射速降约 1/5）。
+		# 这一条很容易漏 —— 漏了的话「诱捕网」就只是个减速，
+		# 而它在原作里真正的价值是「把对方的输出砍掉五分之一」。
+		"atk_cd_mult": 1.25,
+		# ⚠️ `affects: "all"` —— **敌我不分，而且对空也有效**。
+		#
+		#    星际 1 的原文是「覆盖区域内**任何**未潜伏单位」，
+		#    而且明确提到飞行单位转向/加速也变慢。所以它不是
+		#    「只坑敌人」的技能：丢在自己人头上照样变慢。
+		#    好在它**不造成伤害**，误伤代价只是「自己也慢了」，
+		#    和心灵风暴的「打死自己人」不是一个量级。
+		"affects": "all", "cooldown": 1.0,
 	},
 }
 

@@ -723,6 +723,72 @@ func _process(delta: float) -> bool:
 
 	elif _frames == 680:
 		_grab("37_effect_rings")
+		# 诱捕网的瞄准态。它和心灵风暴**共用同一套 `ground_aoe` 瞄准 UI**，
+		# 但预览圈半径来自各自的表（诱捕网 80 / 风暴 52）——
+		# 这一屏要验的正是「换一个法术，预览圈跟着换大小」。
+		var wd: World = _main.world
+		var bd: Building = wd.buildings_of(World.PLAYER)[0]
+		wd.units.clear()
+		wd.spell_zones.clear()
+		wd.selected_building = null
+		var qn := wd._spawn_unit("queen", "zerg", bd.pos + Vector2(-70, 90), World.PLAYER)
+		qn.energy = 200.0
+		wd.update_visibility()
+		_main.cam_zoom = 1.15
+		_main.cam_pos = bd.pos + Vector2(30, 130)
+		_main._clamp_camera()
+		wd.selection = [qn]
+		_main._aim_spell = "ensnare"
+		_main._aim_pos = bd.pos + Vector2(110, 60)
+		_main.queue_redraw()
+		print("[shot] 诱捕网瞄准态已就绪（预览圈半径 %.0f）"
+			% float(GameData.get_spell("ensnare").get("radius", 0.0)))
+
+	elif _frames == 690:
+		_grab("38_ensnare_aim")
+		_main._aim_spell = ""
+		# 诱捕网**落地后**的画面：黏液光 + 被抓单位的蓝白减速环（含一个空中单位）。
+		#
+		# ⚠️ 落地反馈只有 0.35 秒的一圈光，而 `_add_effect` 的寿命是在 `step()`
+		#    里递减的 —— 所以这里**施法之后一帧都不推进**，直接截图。
+		#    先 `step()` 再截的话，光晕已经淡掉，看起来像「施放没有反馈」。
+		# ⚠️ 不跑 `step()` 还有一个好处：四个单位挤在 100px 内，
+		#    真打起来的话这一屏会变成「战斗现场」而不是「诱捕网现场」。
+		var we: World = _main.world
+		var be: Building = we.buildings_of(World.PLAYER)[0]
+		we.units.clear()
+		we.spell_zones.clear()
+		we.ai_enabled = false
+		var q2 := we._spawn_unit("queen", "zerg", be.pos + Vector2(-170, 40), World.PLAYER)
+		q2.energy = 200.0
+		var spot := be.pos + Vector2(0, 40)
+		we._spawn_unit("marine", "terran", spot + Vector2(-72, 0), World.ENEMY)
+		we._spawn_unit("mutalisk", "zerg", spot + Vector2(0, -68), World.ENEMY)
+		we._spawn_unit("hydralisk", "zerg", spot + Vector2(72, 0), World.PLAYER)
+		# ★圈外的对照单位★ —— 半径 80，摆到 108。
+		# 这一屏要一眼看出「圈内画减速环、圈外不画」：
+		# 只摆圈内的单位的话，玩家分不清「环是因为中招才有的」
+		# 还是「所有单位本来就有一圈」（护盾环就长这样）。
+		we._spawn_unit("marine", "terran", spot + Vector2(108, 0), World.ENEMY)
+		var cast_ok := we.cmd_ability([q2], "ensnare", spot)
+		var caught := 0
+		for u in we.units:
+			if u.has_effect("ensnare"):
+				caught += 1
+		we.selection = [q2]
+		we.update_visibility()
+		# ⚠️ 缩放到 2.2 是**必要的**：减速环半径只有单位半径的 1.55 倍，
+		#    1.5 倍缩放下不到 20 像素，和底盘糊在一起分不出「画了没有」。
+		#    2.2 倍下四圈蓝白环一眼可辨，同时整片黏液光还在画面里。
+		_main.cam_zoom = 2.2
+		_main.cam_pos = spot + Vector2(24, 6)
+		_main._clamp_camera()
+		_main.queue_redraw()
+		print("[shot] 诱捕网落地场景已就绪 cast=%s 被抓 %d 个（含空中，另有 1 个圈外对照）"
+			% [str(cast_ok), caught])
+
+	elif _frames == 700:
+		_grab("39_ensnare_cast")
 		print("[shot] 全部截图完成")
 		return true
 
@@ -840,6 +906,25 @@ func _make_art_sheet() -> void:
 	#    蝎子必须**扁而宽**（否则和跳虫、蟑螂糊成一团）、
 	#    科学球**不能有炮管**（否则和幽灵战机混淆）。
 	_sheet(["high_templar", "defiler", "science_vessel"], "24_zoom_units_m5", 3, 320, 3)
+	# 第十六轮（M6）的虫后 + 虫后巢穴。
+	#
+	# ⚠️ 这两张的约束同样是「**只有放大图能验**」的：
+	#    虫后**不能画成圆滚滚带环**（那是科学球，两个都是零攻击力的空中支援单位）、
+	#    虫后巢穴**不能用圆形主轮廓**（虫族现有四个建筑全是圆形系，
+	#    而它和孵化池职责最接近，缩到 0.6 倍几乎一样）。
+	_sheet(["queen", "queen_nest"], "25_zoom_m6", 2, 320, 3)
+	# 虫族建筑**同族对照图**（第十六轮 M6 加）。
+	#
+	# ⚠️ 为什么单出这一张：`_bg_zerg` 给**所有**虫族建筑画了同一个
+	#    「14 根尖刺的圆环底盘」（r=40），所以外轮廓完全一样，
+	#    能区分的只有半径 36 以内的**内芯**。
+	#    而 `21_sheet_buildings` 是 1 倍缩放、6 列，虫族那 7 个挤在两行里，
+	#    内芯只有二三十像素 —— 撞车了根本看不出来。
+	#    `queen_nest` 和 `spawning_pool` 职责最接近（都是「造兵的建筑」），
+	#    是这一轮最可能撞车的一对。
+	_sheet(["hive", "spawning_pool", "spire", "queen_nest",
+		"evolution_chamber", "extractor", "spore_colony"],
+		"26_zoom_zerg_buildings", 4, 320, 3)
 
 func _sheet(ids: Array, tag: String, cols: int, cell: int, scale: int = 1) -> void:
 	var rows := int(ceil(float(ids.size()) / float(cols)))
